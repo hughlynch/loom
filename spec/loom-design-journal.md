@@ -157,3 +157,37 @@ higher-quality extraction in production.
 
 Two golden fixtures now pass: census.gov (T1, verified) and
 AP News climate article (T3, reported). 61 Python tests.
+
+## 2026-03-06: Momentum i4 — dedup + contradictions
+
+Added three critical integrity features:
+
+**Deduplication**: store_claim now checks for exact statement
+match before inserting. Duplicate claims merge evidence rather
+than creating redundant records. Same-URL evidence is also
+deduped. Higher-confidence re-submissions upgrade the stored
+confidence.
+
+**Numeric contradiction detection**: find_contradictions
+compares claims pairwise, extracting numbers with units and
+flagging pairs where values differ by >20% in the same unit.
+Multipliers (million, billion) are normalized before comparison.
+
+**Contested propagation**: record_contradiction sets both
+claims to "contested" and recomputes confidence at the
+contested floor for their tier. Version records track the
+change with the contradiction ID as the reason.
+
+**KB find_similar**: fuzzy matching on non-numeric keywords
+to find topically related claims. Filters out numbers
+(which vary) and stopwords, keeping content words for LIKE
+matching.
+
+Bugs fixed: numeric extraction normalized multipliers to
+dimensionless values but then rejected comparison because
+unit was empty. Fixed by allowing dimensionless comparisons.
+Fuzzy search failed when query numbers differed from stored
+numbers — fixed by excluding numeric words from the LIKE
+search.
+
+69 Python tests, all green.

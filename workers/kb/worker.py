@@ -285,10 +285,68 @@ class LoomKBWorker(Worker):
             return {"error": "statement is required", "stored": False}
 
         now = _now_iso()
-        claim_id = _generate_id("claim", statement + now)
-
         db = _get_db(params.get("db_path", ""))
         try:
+            # Deduplication: check for exact match first
+            existing = db.execute(
+                "SELECT claim_id FROM claims WHERE statement = ?",
+                (statement,),
+            ).fetchone()
+
+            if existing:
+                # Add new evidence to existing claim instead of duplicating
+                claim_id = existing["claim_id"]
+                evidence_list = params.get("evidence", [])
+                for ev in evidence_list:
+                    # Check if this exact evidence already exists
+                    dup_ev = db.execute(
+                        "SELECT evidence_id FROM evidence "
+                        "WHERE claim_id = ? AND source_url = ?",
+                        (claim_id, ev.get("source_url", "")),
+                    ).fetchone()
+                    if dup_ev:
+                        continue
+                    evidence_id = _generate_id(
+                        "ev", claim_id + ev.get("source_url", "") + now
+                    )
+                    db.execute(
+                        "INSERT INTO evidence "
+                        "(evidence_id, claim_id, source_url, source_tier, "
+                        "content_hash, excerpt, retrieved_at, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            evidence_id, claim_id,
+                            ev.get("source_url", ""),
+                            ev.get("source_tier", ""),
+                            ev.get("content_hash", ""),
+                            ev.get("excerpt", ""),
+                            ev.get("retrieved_at", now), now,
+                        ),
+                    )
+
+                # Update confidence if new evidence provides higher confidence
+                new_conf = params.get("confidence", 0.0)
+                if new_conf > 0:
+                    current = db.execute(
+                        "SELECT confidence FROM claims WHERE claim_id = ?",
+                        (claim_id,),
+                    ).fetchone()
+                    if current and new_conf > current["confidence"]:
+                        db.execute(
+                            "UPDATE claims SET confidence = ?, updated_at = ? "
+                            "WHERE claim_id = ?",
+                            (new_conf, now, claim_id),
+                        )
+
+                db.commit()
+                return {
+                    "claim_id": claim_id,
+                    "stored": True,
+                    "deduplicated": True,
+                }
+
+            claim_id = _generate_id("claim", statement + now)
+
             db.execute(
                 "INSERT INTO claims "
                 "(claim_id, statement, category, confidence, status, "
@@ -360,6 +418,175 @@ class LoomKBWorker(Worker):
         finally:
             db.close()
 
+
+    @skill("loom.kb.find_similar", "Find claims similar to a statement")
+    def kb_find_similar(self, handle):
+        """Find claims in the KB that are similar to a given statement.
+
+        Uses exact match and LIKE-based fuzzy matching. Returns matches
+        with their current confidence and evidence.
+
+        Params (from handle.params):
+            statement (str): The statement to match against.
+            threshold (float, optional): Minimum word overlap (0-1).
+
+        Returns:
+            dict with exact_matches and fuzzy_matches.
+        """
+        params = handle.params
+        statement = params.get("statement", "")
+
+        if not statement:
+            return {"error": "statement is required"}
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            # Exact match
+            exact = db.execute(
+                "SELECT * FROM claims WHERE statement = ?", (statement,)
+            ).fetchall()
+
+            # Fuzzy: match on significant words (3+ chars, not stopwords)
+            stopwords = {"the", "a", "an", "is", "are", "was", "were",
+                         "in", "on", "at", "to", "for", "of", "and",
+                         "or", "but", "not", "with", "by", "from", "that"}
+            words = [w.lower().strip(".,;:!?\"'()") for w in statement.split()
+                     if len(w) > 2 and w.lower() not in stopwords]
+
+            fuzzy = []
+            if words:
+                # Search for claims containing key words.
+                # Use top non-numeric keywords for fuzzy match
+                # (numbers vary, words indicate topic similarity)
+                text_words = [w for w in words if not w.replace(",", "").isdigit()][:3]
+                if not text_words:
+                    text_words = words[:2]
+
+                conditions = " AND ".join(
+                    "statement LIKE ?" for _ in text_words
+                )
+                args = [f"%{w}%" for w in text_words]
+                rows = db.execute(
+                    f"SELECT * FROM claims WHERE {conditions} "
+                    "AND statement != ? LIMIT 20",
+                    args + [statement],
+                ).fetchall()
+                fuzzy = [dict(r) for r in rows]
+
+            return {
+                "exact_matches": [dict(r) for r in exact],
+                "fuzzy_matches": fuzzy,
+            }
+        finally:
+            db.close()
+
+    @skill("loom.kb.record_contradiction", "Record a contradiction between claims")
+    def kb_record_contradiction(self, handle):
+        """Record a contradiction between two claims.
+
+        Updates both claims to 'contested' status with reduced confidence.
+
+        Params (from handle.params):
+            claim_a_id (str): First claim ID.
+            claim_b_id (str): Second claim ID.
+            nature (str): Nature of contradiction (numeric_conflict,
+                direct_negation, temporal_conflict, scope_conflict).
+
+        Returns:
+            dict with contradiction_id, recorded (bool).
+        """
+        params = handle.params
+        claim_a_id = params.get("claim_a_id", "")
+        claim_b_id = params.get("claim_b_id", "")
+        nature = params.get("nature", "unspecified")
+
+        if not claim_a_id or not claim_b_id:
+            return {"error": "claim_a_id and claim_b_id required", "recorded": False}
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            # Verify both claims exist
+            a = db.execute(
+                "SELECT * FROM claims WHERE claim_id = ?", (claim_a_id,)
+            ).fetchone()
+            b = db.execute(
+                "SELECT * FROM claims WHERE claim_id = ?", (claim_b_id,)
+            ).fetchone()
+            if not a or not b:
+                return {"error": "one or both claims not found", "recorded": False}
+
+            # Check for existing contradiction
+            existing = db.execute(
+                "SELECT contradiction_id FROM contradictions "
+                "WHERE (claim_a_id = ? AND claim_b_id = ?) "
+                "OR (claim_a_id = ? AND claim_b_id = ?)",
+                (claim_a_id, claim_b_id, claim_b_id, claim_a_id),
+            ).fetchone()
+            if existing:
+                return {
+                    "contradiction_id": existing["contradiction_id"],
+                    "recorded": True,
+                    "already_existed": True,
+                }
+
+            now = _now_iso()
+            contradiction_id = _generate_id(
+                "contra", claim_a_id + claim_b_id + now
+            )
+
+            db.execute(
+                "INSERT INTO contradictions "
+                "(contradiction_id, claim_a_id, claim_b_id, nature, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (contradiction_id, claim_a_id, claim_b_id, nature, now),
+            )
+
+            # Update both claims to contested status
+            for cid in (claim_a_id, claim_b_id):
+                row = db.execute(
+                    "SELECT confidence, source_tier FROM claims WHERE claim_id = ?",
+                    (cid,),
+                ).fetchone()
+                if row:
+                    # Recompute confidence at contested level
+                    tier = row["source_tier"] or "T5"
+                    # Use contested floor from confidence rules
+                    contested_floors = {
+                        "T1": 0.40, "T2": 0.30, "T3": 0.20,
+                        "T4": 0.15, "T5": 0.10, "T6": 0.05, "T7": 0.01,
+                    }
+                    new_conf = contested_floors.get(tier, 0.10)
+
+                    db.execute(
+                        "UPDATE claims SET status = 'contested', "
+                        "confidence = ?, updated_at = ? WHERE claim_id = ?",
+                        (new_conf, now, cid),
+                    )
+
+                    # Version record
+                    ver_id = _generate_id("ver", cid + now + "contradiction")
+                    db.execute(
+                        "INSERT INTO claim_versions "
+                        "(version_id, claim_id, statement, confidence, "
+                        "status, changed_by, change_reason, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            ver_id, cid, row["source_tier"] or "",
+                            new_conf, "contested", "system",
+                            f"contradiction with {contradiction_id}", now,
+                        ),
+                    )
+
+            db.commit()
+            return {
+                "contradiction_id": contradiction_id,
+                "recorded": True,
+            }
+        except Exception as e:
+            db.rollback()
+            return {"error": str(e), "recorded": False}
+        finally:
+            db.close()
 
     @skill("loom.kb.update_claim", "Update an existing claim with new evidence")
     def kb_update_claim(self, handle):

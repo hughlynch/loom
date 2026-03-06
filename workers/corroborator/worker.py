@@ -6,6 +6,7 @@ deterministic rules based on evidence hierarchy.
 """
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -222,17 +223,69 @@ class CorroboratorWorker(Worker):
         if len(claims) < 2:
             return {"contradictions": [], "note": "Need at least 2 claims"}
 
-        # Stub: in production, this uses LLM to compare claims pairwise
-        # (or uses semantic similarity to prune the comparison space first).
         contradictions = []
 
-        # Example structure for a found contradiction:
-        # {
-        #     "claim_a": {"statement": "...", "claim_id": "..."},
-        #     "claim_b": {"statement": "...", "claim_id": "..."},
-        #     "nature": "direct_negation" | "numeric_conflict" |
-        #               "temporal_conflict" | "scope_conflict",
-        # }
+        # Extract numbers from claims for numeric conflict detection
+        def _extract_numbers(text):
+            """Find numbers with optional units in text."""
+            matches = re.findall(
+                r'(\d[\d,]*(?:\.\d+)?)\s*'
+                r'(million|billion|trillion|thousand|percent|%|'
+                r'degrees?|dollars?)?',
+                text, re.IGNORECASE,
+            )
+            results = []
+            for num_str, unit in matches:
+                try:
+                    val = float(num_str.replace(",", ""))
+                    unit = unit.lower().rstrip("s") if unit else ""
+                    # Normalize multipliers
+                    if unit == "thousand":
+                        val *= 1_000
+                        unit = ""
+                    elif unit == "million":
+                        val *= 1_000_000
+                        unit = ""
+                    elif unit == "billion":
+                        val *= 1_000_000_000
+                        unit = ""
+                    elif unit == "trillion":
+                        val *= 1_000_000_000_000
+                        unit = ""
+                    results.append((val, unit))
+                except ValueError:
+                    continue
+            return results
+
+        # Pairwise comparison
+        for i in range(len(claims)):
+            for j in range(i + 1, len(claims)):
+                a = claims[i]
+                b = claims[j]
+                stmt_a = a.get("statement", "")
+                stmt_b = b.get("statement", "")
+
+                # Check for numeric contradictions
+                nums_a = _extract_numbers(stmt_a)
+                nums_b = _extract_numbers(stmt_b)
+
+                for na_val, na_unit in nums_a:
+                    for nb_val, nb_unit in nums_b:
+                        # Same unit (including both dimensionless) with
+                        # significantly different values
+                        if na_unit == nb_unit and na_val != 0 and nb_val != 0:
+                            ratio = max(na_val, nb_val) / min(na_val, nb_val)
+                            if ratio > 1.2:  # >20% difference
+                                contradictions.append({
+                                    "claim_a": a,
+                                    "claim_b": b,
+                                    "nature": "numeric_conflict",
+                                    "detail": f"{na_val} {na_unit} vs {nb_val} {nb_unit}",
+                                })
+                                break  # One contradiction per pair is enough
+                    else:
+                        continue
+                    break
 
         return {
             "contradictions": contradictions,

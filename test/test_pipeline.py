@@ -708,6 +708,184 @@ class TestAutomatedPipeline(unittest.TestCase):
             self.assertTrue(store["stored"])
 
 
+class TestDeduplication(unittest.TestCase):
+    """Test KB deduplication on store."""
+
+    def setUp(self):
+        self.kb = LoomKBWorker(worker_id="test-kb")
+        self.db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.db_file.name
+        self.db_file.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def _params(self, **kwargs):
+        kwargs["db_path"] = self.db_path
+        return MockHandle(kwargs)
+
+    def test_exact_duplicate_merges(self):
+        """Storing same statement twice should not create duplicate."""
+        stmt = "The population is 340 million"
+        r1 = self.kb.kb_store_claim(self._params(
+            statement=stmt, source_tier="T1",
+            evidence=[{"source_url": "https://census.gov/pop"}],
+        ))
+        r2 = self.kb.kb_store_claim(self._params(
+            statement=stmt, source_tier="T3",
+            evidence=[{"source_url": "https://nytimes.com/pop"}],
+        ))
+        self.assertTrue(r1["stored"])
+        self.assertTrue(r2["stored"])
+        self.assertTrue(r2.get("deduplicated", False))
+        # Same claim_id
+        self.assertEqual(r1["claim_id"], r2["claim_id"])
+
+        # Should have 2 evidence links
+        query = self.kb.kb_query_claim(self._params(claim_id=r1["claim_id"]))
+        self.assertEqual(len(query["evidence_chain"]), 2)
+
+    def test_same_url_evidence_not_duplicated(self):
+        """Re-harvesting same URL should not add duplicate evidence."""
+        stmt = "Water boils at 100 degrees"
+        url = "https://noaa.gov/water"
+        self.kb.kb_store_claim(self._params(
+            statement=stmt, evidence=[{"source_url": url}],
+        ))
+        self.kb.kb_store_claim(self._params(
+            statement=stmt, evidence=[{"source_url": url}],
+        ))
+        # Search for the claim
+        search = self.kb.kb_search(self._params(query="boils"))
+        claim_id = search["results"][0]["claim_id"]
+        query = self.kb.kb_query_claim(self._params(claim_id=claim_id))
+        # Only 1 evidence link (not 2)
+        self.assertEqual(len(query["evidence_chain"]), 1)
+
+    def test_higher_confidence_preserved(self):
+        """Second store with higher confidence should update."""
+        stmt = "The sky is blue"
+        r1 = self.kb.kb_store_claim(self._params(
+            statement=stmt, confidence=0.50,
+        ))
+        self.kb.kb_store_claim(self._params(
+            statement=stmt, confidence=0.90,
+        ))
+        query = self.kb.kb_query_claim(self._params(claim_id=r1["claim_id"]))
+        self.assertAlmostEqual(query["claim"]["confidence"], 0.90)
+
+
+class TestContradictionDetection(unittest.TestCase):
+    """Test contradiction detection and contested propagation."""
+
+    def setUp(self):
+        self.corroborator = CorroboratorWorker(worker_id="test-corr")
+        self.kb = LoomKBWorker(worker_id="test-kb")
+        self.db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.db_file.name
+        self.db_file.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def _params(self, **kwargs):
+        kwargs["db_path"] = self.db_path
+        return MockHandle(kwargs)
+
+    def test_numeric_contradiction_detected(self):
+        """Claims with conflicting numbers should be flagged."""
+        claims = [
+            {"statement": "The project cost $4 million dollars"},
+            {"statement": "The project cost $6 million dollars"},
+        ]
+        result = self.corroborator.find_contradictions(
+            MockHandle({"claims": claims})
+        )
+        self.assertGreater(len(result["contradictions"]), 0)
+        self.assertEqual(result["contradictions"][0]["nature"], "numeric_conflict")
+
+    def test_similar_numbers_no_contradiction(self):
+        """Numbers within 20% should not trigger contradiction."""
+        claims = [
+            {"statement": "Temperature was 98 degrees"},
+            {"statement": "Temperature was 99 degrees"},
+        ]
+        result = self.corroborator.find_contradictions(
+            MockHandle({"claims": claims})
+        )
+        self.assertEqual(len(result["contradictions"]), 0)
+
+    def test_record_contradiction_updates_status(self):
+        """Recording a contradiction should set both claims to contested."""
+        r1 = self.kb.kb_store_claim(self._params(
+            statement="Population is 50,000",
+            confidence=0.85, status="corroborated", source_tier="T3",
+        ))
+        r2 = self.kb.kb_store_claim(self._params(
+            statement="Population is 60,000",
+            confidence=0.70, status="reported", source_tier="T3",
+        ))
+
+        # Record contradiction
+        contra = self.kb.kb_record_contradiction(self._params(
+            claim_a_id=r1["claim_id"],
+            claim_b_id=r2["claim_id"],
+            nature="numeric_conflict",
+        ))
+        self.assertTrue(contra["recorded"])
+
+        # Both claims should now be contested
+        q1 = self.kb.kb_query_claim(self._params(claim_id=r1["claim_id"]))
+        q2 = self.kb.kb_query_claim(self._params(claim_id=r2["claim_id"]))
+        self.assertEqual(q1["claim"]["status"], "contested")
+        self.assertEqual(q2["claim"]["status"], "contested")
+
+        # Confidence should have dropped
+        self.assertLess(q1["claim"]["confidence"], 0.85)
+        self.assertLess(q2["claim"]["confidence"], 0.70)
+
+        # Contradiction should be in both claims' query results
+        self.assertEqual(len(q1["contradictions"]), 1)
+        self.assertEqual(len(q2["contradictions"]), 1)
+
+    def test_duplicate_contradiction_not_created(self):
+        """Recording same contradiction twice should not create duplicate."""
+        r1 = self.kb.kb_store_claim(self._params(
+            statement="X is 10", source_tier="T3",
+        ))
+        r2 = self.kb.kb_store_claim(self._params(
+            statement="X is 20", source_tier="T3",
+        ))
+        c1 = self.kb.kb_record_contradiction(self._params(
+            claim_a_id=r1["claim_id"], claim_b_id=r2["claim_id"],
+            nature="numeric_conflict",
+        ))
+        c2 = self.kb.kb_record_contradiction(self._params(
+            claim_a_id=r1["claim_id"], claim_b_id=r2["claim_id"],
+            nature="numeric_conflict",
+        ))
+        self.assertTrue(c2.get("already_existed", False))
+        self.assertEqual(c1["contradiction_id"], c2["contradiction_id"])
+
+    def test_find_similar_claims(self):
+        """KB find_similar should locate related claims."""
+        self.kb.kb_store_claim(self._params(
+            statement="City population is 50,000 residents",
+        ))
+        self.kb.kb_store_claim(self._params(
+            statement="City population is 60,000 residents",
+        ))
+        self.kb.kb_store_claim(self._params(
+            statement="The weather is sunny today",
+        ))
+
+        result = self.kb.kb_find_similar(self._params(
+            statement="City population is 55,000 residents",
+        ))
+        # Should find the two population claims as fuzzy matches
+        self.assertGreaterEqual(len(result["fuzzy_matches"]), 2)
+
+
 class TestGoldenPipeline(unittest.TestCase):
     """End-to-end pipeline test using golden fixture."""
 
