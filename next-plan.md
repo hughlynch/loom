@@ -1,16 +1,29 @@
 # Loom — Next Plan
 
-## Phase 1: Foundation
+## Iteration 2: Claim-type classification + temporal model
 
-1. Evidence graph schema — SQLite DB with sources, claims, evidence, contradictions tables
-2. Harvester worker — web fetching with content hashing and robots.txt respect
-3. Classifier worker — T1-T7 tier assignment with domain verification
-4. Corroborator worker — deterministic confidence computation
-5. KB worker — storage and query over the evidence graph
-6. E2E test — full acquisition pipeline (harvest → classify → extract → corroborate → store)
+From architectural-recommendations.md Phase 1 (no arch change needed):
+
+1. **Claim-type classification** — Add `classify.claim_type` skill to
+   classifier that categorizes claims as empirical_fact, statistical,
+   causal, prediction, opinion, attribution, or temporal. Different
+   claim types get different assessment methods and TTL defaults.
+
+2. **Temporal validity model** — Enhance `classify.temporal_validity`
+   to compute real validity windows based on claim type and source date.
+   Add `valid_from`, `valid_until`, `temporal_status` (current/outdated/
+   superseded) to KB schema.
+
+3. **KB update_claim skill** — Add ability to update an existing claim's
+   confidence/status when new evidence arrives (with version tracking).
+
+4. **Multi-source corroboration test** — Golden fixture with same claim
+   from 2+ sources at different tiers, verifying corroboration boost
+   and independence check.
 
 ## Success criteria
-- All workers register and respond to skill invocations
-- Evidence graph stores claims with full provenance
-- Confidence computation matches spec rules deterministically
-- E2E test passes with a golden fixture (known source → expected claims → expected confidence)
+- Claim-type classifier assigns correct types to test claims
+- Temporal validity windows match expected TTL for each claim type
+- KB supports claim updates with version history
+- Multi-source corroboration test demonstrates confidence boost
+- All tests pass (target: 30+ Python tests)

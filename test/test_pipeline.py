@@ -129,6 +129,28 @@ class TestClassification(unittest.TestCase):
         )
         self.assertEqual(result["tier"], "T1")
 
+    def test_t3_news_domain(self):
+        for domain in ["apnews.com", "reuters.com", "bbc.com", "nytimes.com"]:
+            result = self.classifier.classify_source_tier(
+                MockHandle({"url": f"https://www.{domain}/article/123"})
+            )
+            self.assertEqual(result["tier"], "T3", f"{domain} should be T3")
+            self.assertTrue(result["domain_verified"])
+
+    def test_t4_expert_domain(self):
+        for domain in ["nature.com", "arxiv.org", "pewresearch.org"]:
+            result = self.classifier.classify_source_tier(
+                MockHandle({"url": f"https://{domain}/paper/456"})
+            )
+            self.assertEqual(result["tier"], "T4", f"{domain} should be T4")
+
+    def test_t6_social_domain(self):
+        for domain in ["reddit.com", "twitter.com", "medium.com"]:
+            result = self.classifier.classify_source_tier(
+                MockHandle({"url": f"https://www.{domain}/post/789"})
+            )
+            self.assertEqual(result["tier"], "T6", f"{domain} should be T6")
+
     def test_missing_url_errors(self):
         result = self.classifier.classify_source_tier(
             MockHandle({"url": ""})

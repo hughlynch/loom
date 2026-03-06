@@ -1,0 +1,1 @@
+{"iteration":1,"timestamp":"2026-03-06T12:00:00Z","gates":{"safety":true,"architecture":true,"style":true,"protocol_compliance":true},"scores":{"correctness":0.95,"impact":0.80,"scope":0.75,"testing":0.90,"completeness":0.80},"weighted":0.8425,"verdict":"PASS","summary":"harvest.api real, classifier T3/T4/T6 domain lists, 22 tests pass"}

@@ -158,9 +158,45 @@ class HarvesterWorker(Worker):
         if not url:
             return {"error": "url is required"}
 
-        # Stub: in production, use urllib.request to fetch the API response.
-        data = {"stub": True, "source": url, "method": method}
-        raw = json.dumps(data, sort_keys=True)
+        import urllib.request
+        import urllib.error
+
+        extra_headers = params.get("headers", {})
+        body = params.get("body")
+
+        try:
+            req_data = None
+            if body is not None:
+                req_data = json.dumps(body).encode("utf-8")
+                extra_headers.setdefault("Content-Type", "application/json")
+
+            req = urllib.request.Request(
+                url, data=req_data, method=method,
+                headers={
+                    "User-Agent": "Loom/0.1 (knowledge-acquisition)",
+                    "Accept": "application/json",
+                    **extra_headers,
+                },
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode(
+                    resp.headers.get_content_charset() or "utf-8",
+                    errors="replace",
+                )
+                status_code = resp.status
+        except urllib.error.HTTPError as e:
+            return {"error": f"HTTP {e.code}", "url": url}
+        except urllib.error.URLError as e:
+            return {"error": str(e.reason), "url": url}
+        except Exception as e:
+            return {"error": str(e), "url": url}
+
+        # Try to parse as JSON; fall back to raw text
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = {"_raw": raw}
+
         content_hash = _compute_hash(raw)
 
         return {
@@ -168,6 +204,11 @@ class HarvesterWorker(Worker):
             "data": data,
             "content_hash": content_hash,
             "retrieved_at": _now_iso(),
+            "metadata": {
+                "status_code": status_code,
+                "method": method,
+                "content_length": len(raw),
+            },
         }
 
     @skill("harvest.document", "Process an uploaded document")

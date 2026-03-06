@@ -68,3 +68,32 @@ Next: Apply Phase 1 recommendations (ClaimReview export,
 claim-type classification, process documentation, temporal
 model, source re-certification) without architecture changes.
 Then Phase 2 dual-axis schema upgrade.
+
+## 2026-03-06: Phase 1 foundation complete (momentum i0)
+
+Core pipeline working end-to-end: harvest → classify →
+corroborate → store → query. Golden fixture test exercises
+the full chain with census.gov content.
+
+Real implementations:
+- harvest.web: HTTP fetch, HTML→text, SHA-256 content hash
+- classify.source_tier: domain-verified T1/T2
+- corroborate.check: deterministic confidence (tier×status)
+- KB: SQLite evidence graph with version tracking
+
+44 Go E2E + 19 Python pipeline tests, all green.
+
+## 2026-03-06: Momentum i1 — widen the pipeline
+
+Made harvest.api real (HTTP with JSON parsing, method/headers/
+body support). Expanded classifier domain lists: T3 news
+(AP, Reuters, BBC, NYT, etc.), T4 expert (Nature, arXiv,
+Pew, etc.), T6 social (Reddit, Twitter, Medium, etc.).
+22 Python tests now.
+
+Design decision: domain-based classification is a fast first
+pass. The rubric scoring (editorial_oversight, author_credentials,
+etc.) remains stubbed — it needs content analysis (LLM or
+heuristic) which is iteration 2+ work. Domain lists are
+deliberately conservative: better to default T5 and upgrade
+via rubric than to over-classify.

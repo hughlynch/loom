@@ -93,6 +93,29 @@ ANTI_PATTERN_TIER_INFLATION = "tier_inflation"  # Assigning higher tier than war
 ANTI_PATTERN_DOMAIN_ONLY = "domain_only_classification"  # Relying solely on domain
 ANTI_PATTERN_NO_TEMPORAL = "no_temporal_bounds"  # Omitting validity window
 
+# Known T3 news domains (quality journalism with editorial standards)
+T3_NEWS_DOMAINS = {
+    "apnews.com", "reuters.com", "bbc.com", "bbc.co.uk",
+    "nytimes.com", "washingtonpost.com", "wsj.com",
+    "theguardian.com", "economist.com", "ft.com",
+    "npr.org", "pbs.org", "propublica.org",
+}
+
+# Known T4 expert analysis domains
+T4_EXPERT_DOMAINS = {
+    "nature.com", "science.org", "sciencedirect.com",
+    "springer.com", "wiley.com", "jstor.org",
+    "arxiv.org", "pubmed.ncbi.nlm.nih.gov",
+    "brookings.edu", "rand.org", "pewresearch.org",
+}
+
+# Known T6 social/UGC domains
+T6_SOCIAL_DOMAINS = {
+    "reddit.com", "twitter.com", "x.com", "facebook.com",
+    "tiktok.com", "instagram.com", "threads.net",
+    "medium.com", "substack.com",
+}
+
 # Temporal TTL categories
 TTL_PERMANENT = "permanent"       # Laws, historical facts
 TTL_LONG_TERM = "long_term"       # Multi-year validity (policies, standards)
@@ -157,15 +180,27 @@ class ClassifierWorker(Worker):
         domain_check = _check_domain(url)
 
         # Deterministic domain-based classification
+        domain = domain_check["domain"]
+        # Strip www. prefix for matching
+        bare_domain = domain.lstrip("www.")
+
         if domain_check["is_gov"]:
             tier = "T1"
             domain_verified = True
         elif domain_check["is_edu"]:
             tier = "T2"
             domain_verified = True
+        elif bare_domain in T3_NEWS_DOMAINS:
+            tier = "T3"
+            domain_verified = True
+        elif bare_domain in T4_EXPERT_DOMAINS:
+            tier = "T4"
+            domain_verified = True
+        elif bare_domain in T6_SOCIAL_DOMAINS:
+            tier = "T6"
+            domain_verified = True
         else:
-            # Stub: in production, LLM + heuristics analyze content quality,
-            # editorial standards, author credentials, etc.
+            # Default: general web content
             tier = "T5"
             domain_verified = False
 
