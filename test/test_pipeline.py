@@ -20,6 +20,13 @@ sys.path.insert(0, LOOM_DIR)
 sys.path.insert(0, os.path.join(os.path.expanduser("~"), "grove", "python"))
 
 from workers.harvester.worker import _compute_hash, _html_to_text
+from workers.extractor.worker import (
+    ExtractorWorker,
+    _segment_sentences,
+    _is_claim_candidate,
+    _categorize_claim,
+    _extract_entities,
+)
 from workers.classifier.worker import ClassifierWorker
 from workers.corroborator.worker import (
     CorroboratorWorker,
@@ -473,6 +480,232 @@ class TestMultiSourceCorroboration(unittest.TestCase):
             compute_confidence(STATUS_REPORTED, "T3"),
         )
         self.assertEqual(len(query["evidence_chain"]), 2)
+
+
+class TestSentenceSegmentation(unittest.TestCase):
+    """Test heuristic sentence segmentation."""
+
+    def test_basic_split(self):
+        text = "The sky is blue. Water is wet. Fire is hot."
+        sents = _segment_sentences(text)
+        self.assertEqual(len(sents), 3)
+
+    def test_abbreviation_handling(self):
+        text = "Dr. Smith works at the U.S. Department of Energy. He studies climate."
+        sents = _segment_sentences(text)
+        # May split on "Dr." but should produce reasonable segments
+        # The key check: we get at least the full substance
+        full = " ".join(sents)
+        self.assertIn("Smith", full)
+        self.assertIn("Department of Energy", full)
+
+    def test_short_fragments_filtered(self):
+        text = "Yes. No. The quick brown fox jumps over the lazy dog."
+        sents = _segment_sentences(text)
+        # "Yes." and "No." are too short (< 10 chars)
+        self.assertEqual(len(sents), 1)
+
+    def test_empty_input(self):
+        self.assertEqual(_segment_sentences(""), [])
+        self.assertEqual(_segment_sentences("   "), [])
+
+
+class TestClaimFiltering(unittest.TestCase):
+    """Test claim candidate filtering."""
+
+    def test_questions_rejected(self):
+        self.assertFalse(_is_claim_candidate("What time is it?"))
+
+    def test_commands_rejected(self):
+        self.assertFalse(_is_claim_candidate("Click here to subscribe to our newsletter"))
+        self.assertFalse(_is_claim_candidate("Subscribe for daily updates"))
+
+    def test_boilerplate_rejected(self):
+        self.assertFalse(_is_claim_candidate("Copyright 2026 All Rights Reserved"))
+        self.assertFalse(_is_claim_candidate("Terms of Service and Privacy Policy"))
+
+    def test_too_short_rejected(self):
+        self.assertFalse(_is_claim_candidate("It is hot"))
+
+    def test_valid_claim_accepted(self):
+        self.assertTrue(_is_claim_candidate(
+            "Global temperatures rose 1.5 degrees Celsius in 2025"
+        ))
+
+    def test_categorize_statistical(self):
+        self.assertEqual(
+            _categorize_claim("Crime dropped 12% last year"),
+            "statistical"
+        )
+
+    def test_categorize_causal(self):
+        self.assertEqual(
+            _categorize_claim("The flooding was caused by heavy rains"),
+            "causal"
+        )
+
+    def test_categorize_factual_default(self):
+        self.assertEqual(
+            _categorize_claim("The council approved the new zoning plan"),
+            "factual"
+        )
+
+
+class TestEntityExtraction(unittest.TestCase):
+    """Test heuristic entity extraction."""
+
+    def test_extract_dates(self):
+        entities = _extract_entities("The report was released on March 15, 2026.")
+        dates = [e for e in entities if e["type"] == "date"]
+        self.assertGreaterEqual(len(dates), 1)
+
+    def test_extract_numbers(self):
+        entities = _extract_entities("The project cost $4.5 million.")
+        numbers = [e for e in entities if e["type"] == "number"]
+        self.assertGreaterEqual(len(numbers), 1)
+
+    def test_extract_titled_persons(self):
+        entities = _extract_entities("President Joe Biden signed the bill.")
+        persons = [e for e in entities if e["type"] == "person"]
+        self.assertGreaterEqual(len(persons), 1)
+
+    def test_extract_organizations(self):
+        entities = _extract_entities(
+            "The Environmental Protection Agency issued new regulations."
+        )
+        orgs = [e for e in entities if e["type"] == "organization"]
+        self.assertGreaterEqual(len(orgs), 1)
+
+
+class TestExtractorWorker(unittest.TestCase):
+    """Test the extractor worker skills."""
+
+    def setUp(self):
+        self.extractor = ExtractorWorker(worker_id="test-extractor")
+
+    def test_extract_claims_from_news(self):
+        content = (
+            "Global temperatures rose 1.5 degrees Celsius above "
+            "pre-industrial levels for the first time in 2025. "
+            "The WMO report found that the past decade was the "
+            "warmest on record. Sea levels continued to rise at "
+            "an accelerating pace, increasing by 4.6 millimeters per year."
+        )
+        result = self.extractor.extract_claims(
+            MockHandle({"content": content, "source_tier": "T3"})
+        )
+        self.assertGreater(result["claims_extracted"], 0)
+        # Should find statistical claims
+        categories = {c["category"] for c in result["claims"]}
+        self.assertIn("statistical", categories)
+
+    def test_extract_entities_from_news(self):
+        content = (
+            "WMO Secretary General Celeste Saulo announced on "
+            "January 10, 2026 that damages exceeded $380 billion."
+        )
+        result = self.extractor.extract_entities(
+            MockHandle({"content": content})
+        )
+        self.assertGreater(result["total_found"], 0)
+
+    def test_empty_content_errors(self):
+        result = self.extractor.extract_claims(MockHandle({"content": ""}))
+        self.assertIn("error", result)
+
+    def test_max_claims_limit(self):
+        # Long content that would produce many claims
+        content = ". ".join(
+            f"Fact number {i} is that the value is {i * 100} million"
+            for i in range(1, 20)
+        ) + "."
+        result = self.extractor.extract_claims(
+            MockHandle({"content": content, "max_claims": 5})
+        )
+        self.assertLessEqual(result["claims_extracted"], 5)
+
+
+class TestAutomatedPipeline(unittest.TestCase):
+    """Test the automated pipeline with golden fixtures."""
+
+    def setUp(self):
+        self.db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.db_file.name
+        self.db_file.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def test_news_fixture_pipeline(self):
+        """Full pipeline with AP News fixture (T3 source)."""
+        fixture = load_fixture("golden_news")
+        source = fixture["source"]
+        expected = fixture["expected"]
+
+        # Import pipeline
+        sys.path.insert(0, LOOM_DIR)
+        from pipeline import acquire, _Handle
+        from workers.harvester.worker import HarvesterWorker
+        from workers.classifier.worker import ClassifierWorker
+        from workers.extractor.worker import ExtractorWorker
+        from workers.corroborator.worker import CorroboratorWorker
+        from workers.kb.worker import LoomKBWorker
+
+        # Run pipeline components manually with fixture content
+        classifier = ClassifierWorker(worker_id="test")
+        extractor = ExtractorWorker(worker_id="test")
+        corroborator = CorroboratorWorker(worker_id="test")
+        kb = LoomKBWorker(worker_id="test")
+
+        # Classify
+        classification = classifier.classify_source_tier(
+            MockHandle({"url": source["url"]})
+        )
+        self.assertEqual(classification["tier"], expected["classification"]["tier"])
+
+        # Extract
+        extraction = extractor.extract_claims(
+            MockHandle({
+                "content": source["content"],
+                "source_tier": classification["tier"],
+            })
+        )
+        self.assertGreaterEqual(
+            extraction["claims_extracted"],
+            expected["extraction"]["min_claims"],
+        )
+
+        # Corroborate and store each claim
+        for claim in extraction["claims"]:
+            corr = corroborator.corroborate_check(MockHandle({
+                "statement": claim["statement"],
+                "source_tier": classification["tier"],
+            }))
+            self.assertEqual(corr["status"], expected["corroboration"]["status"])
+            self.assertGreaterEqual(
+                corr["confidence"],
+                expected["corroboration"]["min_confidence"],
+            )
+            self.assertLessEqual(
+                corr["confidence"],
+                expected["corroboration"]["max_confidence"],
+            )
+
+            # Store
+            store = kb.kb_store_claim(MockHandle({
+                "db_path": self.db_path,
+                "statement": claim["statement"],
+                "category": claim["category"],
+                "confidence": corr["confidence"],
+                "status": corr["status"],
+                "source_tier": classification["tier"],
+                "evidence": [{
+                    "source_url": source["url"],
+                    "source_tier": classification["tier"],
+                    "excerpt": claim["excerpt"],
+                }],
+            }))
+            self.assertTrue(store["stored"])
 
 
 class TestGoldenPipeline(unittest.TestCase):

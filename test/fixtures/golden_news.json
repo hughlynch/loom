@@ -1,0 +1,24 @@
+{
+  "description": "Golden fixture: AP News article about climate report",
+  "source": {
+    "url": "https://apnews.com/article/climate-change-report-2026",
+    "content": "Global temperatures rose 1.5 degrees Celsius above pre-industrial levels for the first time in 2025, according to a report from the World Meteorological Organization released Tuesday. The WMO report found that the past decade was the warmest on record. Sea levels continued to rise at an accelerating pace, increasing by 4.6 millimeters per year. Arctic sea ice extent reached its second-lowest level since satellite measurements began in 1979. The report warned that extreme weather events caused $380 billion in economic damages worldwide. WMO Secretary General Celeste Saulo said the findings underscore the urgent need for climate action. The Paris Agreement targets limiting warming to 1.5 degrees, a threshold now breached.",
+    "content_type": "text/html; charset=utf-8",
+    "status_code": 200
+  },
+  "expected": {
+    "classification": {
+      "tier": "T3",
+      "domain_verified": true
+    },
+    "extraction": {
+      "min_claims": 3,
+      "expected_categories": ["statistical", "factual"]
+    },
+    "corroboration": {
+      "status": "reported",
+      "min_confidence": 0.50,
+      "max_confidence": 0.65
+    }
+  }
+}

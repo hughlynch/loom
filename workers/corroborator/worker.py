@@ -175,10 +175,11 @@ class CorroboratorWorker(Worker):
             status = STATUS_CORROBORATED
         elif source_tier in ("T1", "T2") and not contradicting_claims:
             status = STATUS_VERIFIED
-        elif matching_claims:
-            status = STATUS_REPORTED
         else:
-            status = STATUS_UNVERIFIED
+            # Single source with no contradictions = reported.
+            # "Unverified" is reserved for claims with no source at all
+            # or where verification was not attempted.
+            status = STATUS_REPORTED
 
         # Independence check (stub: no matches to check against)
         independence_check = {

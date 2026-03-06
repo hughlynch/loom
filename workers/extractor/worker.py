@@ -1,12 +1,13 @@
-"""ExtractorWorker — pulls structured claims from raw content using LLM.
+"""ExtractorWorker — pulls structured claims from raw content.
 
 Responsible for decomposing unstructured text into atomic claims, named
-entities, and relationships. Each claim is a single, verifiable statement
-with temporal bounds and a source excerpt for provenance.
+entities, and relationships. Uses heuristic sentence segmentation and
+pattern matching. LLM integration available when LOOM_MODEL is set.
 """
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -29,14 +30,153 @@ CATEGORY_CAUSAL = "causal"
 ENTITY_PERSON = "person"
 ENTITY_ORGANIZATION = "organization"
 ENTITY_LOCATION = "location"
-ENTITY_EVENT = "event"
-ENTITY_CONCEPT = "concept"
-ENTITY_PRODUCT = "product"
 ENTITY_DATE = "date"
+ENTITY_NUMBER = "number"
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# --- Sentence segmentation ---
+
+_SENTENCE_END = re.compile(
+    r'(?<=[.!?])\s+(?=[A-Z])'  # Split on sentence-ending punct followed by capital
+)
+
+_ABBREVS = {"Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Jr.", "Sr.",
+            "Inc.", "Corp.", "Ltd.", "U.S.", "U.K.", "E.U.",
+            "vs.", "etc.", "approx.", "est.", "Jan.", "Feb.",
+            "Mar.", "Apr.", "Jun.", "Jul.", "Aug.", "Sep.",
+            "Oct.", "Nov.", "Dec."}
+
+
+def _segment_sentences(text: str) -> list[str]:
+    """Split text into sentences using heuristic rules."""
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    if not text:
+        return []
+
+    # Split on sentence boundaries
+    raw = _SENTENCE_END.split(text)
+
+    # Rejoin abbreviation splits
+    sentences = []
+    buffer = ""
+    for chunk in raw:
+        if buffer:
+            chunk = buffer + " " + chunk
+            buffer = ""
+        # Check if chunk ends with a known abbreviation
+        words = chunk.rstrip().rsplit(None, 1)
+        if len(words) > 1 and words[-1] in _ABBREVS:
+            buffer = chunk
+            continue
+        sentences.append(chunk.strip())
+
+    if buffer:
+        sentences.append(buffer.strip())
+
+    return [s for s in sentences if len(s) > 10]
+
+
+# --- Claim filtering ---
+
+_QUESTION_PATTERN = re.compile(r'\?$')
+_COMMAND_PATTERN = re.compile(r'^(Click|Subscribe|Sign up|Follow|Share|Enter|Visit)\b', re.I)
+_BOILERPLATE = re.compile(
+    r'^(Copyright|All rights reserved|Terms of|Privacy|Cookie|'
+    r'Advertisement|Loading|JavaScript|This site)\b', re.I
+)
+_TOO_SHORT = 20  # Minimum chars for a viable claim
+_TOO_LONG = 500  # Maximum chars for an atomic claim
+
+
+def _is_claim_candidate(sentence: str) -> bool:
+    """Filter sentences that are unlikely to be factual claims."""
+    s = sentence.strip()
+    if len(s) < _TOO_SHORT or len(s) > _TOO_LONG:
+        return False
+    if _QUESTION_PATTERN.search(s):
+        return False
+    if _COMMAND_PATTERN.match(s):
+        return False
+    if _BOILERPLATE.match(s):
+        return False
+    # Must contain at least one noun-like word (capitalized or number)
+    if not re.search(r'[A-Z][a-z]|\d', s):
+        return False
+    return True
+
+
+def _categorize_claim(statement: str) -> str:
+    """Assign a claim category using heuristic patterns."""
+    if re.search(
+        r'\b\d+(\.\d+)?%'
+        r'|\b\d[\d,.]*\s*(million|billion|trillion|percent|degrees?|'
+        r'millimeters?|kilometers?|meters?|miles?|tons?|pounds?|'
+        r'dollars?|per year|per month|per day)\b',
+        statement, re.I,
+    ):
+        return CATEGORY_STATISTICAL
+    if re.search(r'\b(caused|because|due to|result of|led to)\b', statement, re.I):
+        return CATEGORY_CAUSAL
+    if re.search(r'\b(should|ought|best|worst|I think|I believe)\b', statement, re.I):
+        return CATEGORY_OPINION
+    if re.search(r'\b(defined as|means|refers to|is called)\b', statement, re.I):
+        return CATEGORY_DEFINITIONAL
+    if re.search(r'\b(must|shall|requires|procedure|step \d)\b', statement, re.I):
+        return CATEGORY_PROCEDURAL
+    return CATEGORY_FACTUAL
+
+
+# --- Entity extraction ---
+
+_PERSON_TITLE = re.compile(
+    r'\b(?:President|Sen\.|Rep\.|Gov\.|Mayor|Chief|Director|Secretary|'
+    r'Dr\.|Prof\.|Mr\.|Mrs\.|Ms\.)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)'
+)
+_ORG_PATTERN = re.compile(
+    r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*'
+    r'(?:\s+(?:Department|Agency|Commission|Bureau|Board|Council|'
+    r'Institute|University|Corporation|Company|Foundation|Association'
+    r')))\b'
+)
+_LOCATION_PATTERN = re.compile(
+    r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*'
+    r'(?:,\s*[A-Z]{2})?)\b'  # City, ST pattern
+)
+_DATE_PATTERN = re.compile(
+    r'\b(?:January|February|March|April|May|June|July|August|'
+    r'September|October|November|December)\s+\d{1,2},?\s*\d{4}\b'
+    r'|\b\d{1,2}/\d{1,2}/\d{4}\b'
+    r'|\b\d{4}-\d{2}-\d{2}\b'
+)
+_NUMBER_PATTERN = re.compile(
+    r'\$[\d,]+(?:\.\d+)?(?:\s*(?:million|billion|trillion))?'
+    r'|\b\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|trillion|percent|%))\b'
+)
+
+
+def _extract_entities(text: str) -> list[dict]:
+    """Extract named entities from text using regex patterns."""
+    entities = []
+    seen = set()
+
+    for pattern, etype in [
+        (_DATE_PATTERN, ENTITY_DATE),
+        (_NUMBER_PATTERN, ENTITY_NUMBER),
+        (_PERSON_TITLE, ENTITY_PERSON),
+        (_ORG_PATTERN, ENTITY_ORGANIZATION),
+    ]:
+        for m in pattern.finditer(text):
+            name = m.group().strip()
+            if name not in seen and len(name) > 2:
+                entities.append({"name": name, "type": etype})
+                seen.add(name)
+
+    return entities
 
 
 class ExtractorWorker(Worker):
@@ -46,45 +186,49 @@ class ExtractorWorker(Worker):
     def extract_claims(self, handle):
         """Extract atomic, verifiable claims from raw content.
 
-        Uses LLM to decompose text into individual claims, each tagged with
-        category, temporal validity bounds, and the source excerpt that
-        supports it.
+        Uses sentence segmentation and heuristic filters to find
+        claim-like sentences. Each claim is tagged with a category
+        and includes the source excerpt for provenance.
 
         Params (from handle.params):
             content (str): The raw text content to extract from.
-            source_tier (str, optional): Source tier (T1-T7) for context.
-            topic_hint (str, optional): Topic hint to guide extraction.
-            max_claims (int, optional): Maximum number of claims to extract.
+            source_tier (str, optional): Source tier (T1-T7).
+            max_claims (int, optional): Maximum claims to extract (default 50).
 
         Returns:
             dict with claims list, each containing statement, category,
-            valid_from, valid_until, excerpt.
+            excerpt.
         """
         params = handle.params
         content = params.get("content", "")
         source_tier = params.get("source_tier", "T5")
-        topic_hint = params.get("topic_hint", "")
+        max_claims = params.get("max_claims", 50)
 
         if not content:
             return {"error": "content is required", "claims": []}
 
-        # Stub: in production, this calls an LLM with a structured extraction
-        # prompt that enforces atomic claims and requires excerpts.
-        # The prompt would include the source_tier and topic_hint for context.
-        claims = [
-            {
-                "statement": f"[stub] Extracted claim from content (tier={source_tier})",
-                "category": CATEGORY_FACTUAL,
-                "valid_from": _now_iso(),
-                "valid_until": None,
-                "excerpt": content[:200] if content else "",
-            }
-        ]
+        sentences = _segment_sentences(content)
+        claims = []
+
+        for sentence in sentences:
+            if not _is_claim_candidate(sentence):
+                continue
+
+            category = _categorize_claim(sentence)
+            claims.append({
+                "statement": sentence,
+                "category": category,
+                "excerpt": sentence,
+            })
+
+            if len(claims) >= max_claims:
+                break
 
         return {
             "claims": claims,
             "source_tier": source_tier,
-            "topic_hint": topic_hint,
+            "total_sentences": len(sentences),
+            "claims_extracted": len(claims),
             "extracted_at": _now_iso(),
         }
 
@@ -92,30 +236,31 @@ class ExtractorWorker(Worker):
     def extract_entities(self, handle):
         """Extract named entities from content with type classification.
 
+        Uses regex patterns for dates, numbers, titled persons, and
+        organizations.
+
         Params (from handle.params):
-            content (str): The raw text content to extract from.
-            entity_types (list, optional): Filter to specific entity types.
+            content (str): The raw text content.
+            entity_types (list, optional): Filter to specific types.
 
         Returns:
-            dict with entities list, each containing name, type, aliases.
+            dict with entities list, each containing name, type.
         """
         params = handle.params
         content = params.get("content", "")
+        type_filter = params.get("entity_types", [])
 
         if not content:
             return {"error": "content is required", "entities": []}
 
-        # Stub: in production, LLM extracts entities with alias resolution.
-        entities = [
-            {
-                "name": "[stub] Example Entity",
-                "type": ENTITY_CONCEPT,
-                "aliases": [],
-            }
-        ]
+        entities = _extract_entities(content)
+
+        if type_filter:
+            entities = [e for e in entities if e["type"] in type_filter]
 
         return {
             "entities": entities,
+            "total_found": len(entities),
             "extracted_at": _now_iso(),
         }
 
@@ -123,16 +268,14 @@ class ExtractorWorker(Worker):
     def extract_relationships(self, handle):
         """Extract relationships between entities in the content.
 
-        Produces subject-predicate-object triples with supporting evidence
-        excerpts.
+        Stub: relationship extraction requires deeper NLP or LLM.
 
         Params (from handle.params):
             content (str): The raw text content.
-            entities (list, optional): Pre-extracted entities to constrain.
+            entities (list, optional): Pre-extracted entities.
 
         Returns:
-            dict with relationships list, each containing subject, predicate,
-            object, evidence.
+            dict with relationships list.
         """
         params = handle.params
         content = params.get("content", "")
@@ -140,19 +283,12 @@ class ExtractorWorker(Worker):
         if not content:
             return {"error": "content is required", "relationships": []}
 
-        # Stub: in production, LLM identifies relationships between
-        # entities found in the text, producing structured triples.
-        relationships = [
-            {
-                "subject": "[stub] Entity A",
-                "predicate": "relates_to",
-                "object": "[stub] Entity B",
-                "evidence": content[:200] if content else "",
-            }
-        ]
-
+        # Stub: relationship extraction is complex and benefits most
+        # from LLM integration. Heuristic approach would need
+        # dependency parsing which is beyond regex.
         return {
-            "relationships": relationships,
+            "relationships": [],
+            "note": "relationship extraction requires LLM integration",
             "extracted_at": _now_iso(),
         }
 

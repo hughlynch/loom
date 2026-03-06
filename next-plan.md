@@ -1,30 +1,32 @@
 # Loom — Next Plan
 
-## Iteration 3: Extractor worker (heuristic claim extraction)
+## Iteration 4: KB deduplication + contradiction detection
 
-The extractor is the missing link in the pipeline. Without it,
-claims must be manually specified. Build a heuristic extractor
-that works without LLM calls (pattern-based), then wire the
-full automated pipeline: URL → harvest → classify → extract →
-corroborate → store.
+The pipeline stores claims but doesn't check for duplicates or
+detect contradictions between stored claims. These are critical
+for the CI/CD model — without dedup, re-harvesting the same URL
+creates duplicate claims; without contradiction detection, the
+"contested" status never triggers.
 
-1. **Heuristic claim extraction** — `extract.claims` skill that
-   finds factual assertions in text using sentence segmentation
-   and heuristic filters (discard questions, commands, fragments).
+1. **KB deduplication** — Before storing, check if a semantically
+   similar claim already exists (exact match + fuzzy LIKE match).
+   If found, add evidence to existing claim instead of creating new.
 
-2. **Entity extraction** — `extract.entities` skill that finds
-   named entities (people, orgs, places, numbers) using regex
-   patterns. Not NER-quality, but sufficient for pipeline wiring.
+2. **Contradiction detection** — `corroborate.find_contradictions`
+   skill that compares numeric claims for conflicts (e.g., "population
+   is 50,000" vs "population is 60,000"). Store contradictions in
+   the contradictions table.
 
-3. **Automated pipeline function** — Python module that chains
-   all workers: given a URL, produce stored claims with provenance.
+3. **Contested status propagation** — When a contradiction is found,
+   update both claims to "contested" status with reduced confidence.
 
-4. **Second golden fixture** — AP News article fixture exercising
-   the full automated pipeline (T3 source, multiple claims).
+4. **Re-harvest test** — Golden fixture: harvest same URL twice,
+   verify no duplicates; harvest conflicting URL, verify contradiction
+   detected and status updated.
 
 ## Success criteria
-- Extractor produces sensible claims from real text
-- Entity extraction finds named entities
-- Automated pipeline runs URL → stored claims without manual steps
-- Two golden fixtures pass (gov T1 + news T3)
-- All tests pass (target: 50+ Python tests)
+- Duplicate claims are merged (same claim from same URL → 1 record)
+- Contradicting claims create contradiction records
+- Contested status propagates to both contradicting claims
+- Confidence drops when claim becomes contested
+- All tests pass (target: 70+ Python tests)

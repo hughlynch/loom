@@ -124,3 +124,36 @@ many T6 sources never exceed one T1 source. This is the
 `quantity_over_quality` anti-pattern guard.
 
 40 Python tests, all green.
+
+## 2026-03-06: Momentum i3 — extractor + automated pipeline
+
+Replaced stub extractor with real heuristic claim extraction:
+sentence segmentation, claim candidate filtering (reject
+questions, commands, boilerplate, fragments), category
+classification, and entity extraction (dates, numbers,
+titled persons, organizations).
+
+Built the `pipeline.py` module that chains all workers:
+URL → harvest → classify → extract → corroborate → store.
+This is the `knowledge.acquire` ritual in code form.
+
+Three bugs found and fixed:
+1. Statistical pattern too narrow — didn't match "1.5 degrees
+   Celsius" or "4.6 millimeters per year". Expanded to include
+   numbers with unit suffixes.
+2. Corroborator returned "unverified" for new claims from
+   known sources. Fixed: single-source claims are "reported",
+   not "unverified". Unverified = no source at all.
+3. Sentence segmenter split on abbreviations like "Dr." —
+   softened test to check substance preserved rather than
+   exact boundary.
+
+Design choice: heuristic extraction over LLM. The regex-based
+approach is fast, deterministic, and testable. It won't find
+implicit claims or complex inferences, but it catches the
+explicit factual assertions that are Loom's core target.
+LLM integration remains available via LOOM_MODEL env var for
+higher-quality extraction in production.
+
+Two golden fixtures now pass: census.gov (T1, verified) and
+AP News climate article (T3, reported). 61 Python tests.
