@@ -1,0 +1,128 @@
+{
+  "id": "ritual.knowledge.contest",
+  "version": "1.0.0",
+  "description": "Community challenge process. Any community member can contest a claim by submitting a claim ID and counter-evidence. The system cross-examines the contested claim, recomputes confidence with the new evidence, and escalates to curator if the result is ambiguous. The pull-request model applied to knowledge.",
+  "params": [
+    {
+      "name": "claim_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "counter_source_url",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "challenger_argument",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "challenger_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "community_id",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "steps": [
+    {
+      "id": "validate_challenge",
+      "skill": "adjudicate.triage_challenge",
+      "skill_version": "1.0.0",
+      "description": "Validate the challenge: counter-source exists and is retrievable, check for duplicate of recently resolved challenge, check challenger rate limits",
+      "context_map": {
+        "claim_id": "{{ params.claim_id }}",
+        "counter_source_url": "{{ params.counter_source_url }}",
+        "challenger_id": "{{ params.challenger_id }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "harvest_counter",
+      "skill": "harvest.web",
+      "skill_version": "1.0.0",
+      "description": "Harvest the counter-evidence source",
+      "depends_on": ["validate_challenge"],
+      "condition": "{{ steps.validate_challenge.result.accepted }}",
+      "context_map": {
+        "url": "{{ params.counter_source_url }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "classify_counter",
+      "skill": "classify.source_tier",
+      "skill_version": "1.0.0",
+      "description": "Classify the counter-evidence source tier",
+      "depends_on": ["harvest_counter"],
+      "context_map": {
+        "content": "{{ steps.harvest_counter.result.content }}",
+        "url": "{{ params.counter_source_url }}",
+        "source_type": "auto"
+      }
+    },
+    {
+      "id": "cross_examine",
+      "skill": "loom.ritual.invoke",
+      "skill_version": "1.0.0",
+      "description": "Run the cross-examine ritual on the contested claim to gather additional evidence",
+      "depends_on": ["classify_counter"],
+      "context_map": {
+        "ritual_id": "ritual.knowledge.cross_examine",
+        "params": {
+          "claim_id": "{{ params.claim_id }}",
+          "community_id": "{{ params.community_id }}",
+          "trigger_reason": "community_challenge"
+        }
+      }
+    },
+    {
+      "id": "recompute_confidence",
+      "skill": "adjudicate.resolve",
+      "skill_version": "1.0.0",
+      "description": "Recompute confidence with all evidence including the new counter-source and cross-examination results",
+      "depends_on": ["cross_examine", "classify_counter"],
+      "context_map": {
+        "claim_id": "{{ params.claim_id }}",
+        "counter_source": "{{ steps.classify_counter.result }}",
+        "counter_content": "{{ steps.harvest_counter.result.content }}",
+        "cross_examination": "{{ steps.cross_examine.result }}",
+        "challenger_argument": "{{ params.challenger_argument }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "escalate",
+      "skill": "curate.review",
+      "skill_version": "1.0.0",
+      "description": "Escalate to curator for human review when the result is ambiguous or contested",
+      "depends_on": ["recompute_confidence"],
+      "condition": "{{ steps.recompute_confidence.result.ambiguous }}",
+      "context_map": {
+        "claim_id": "{{ params.claim_id }}",
+        "challenge_summary": {
+          "challenger_id": "{{ params.challenger_id }}",
+          "challenger_argument": "{{ params.challenger_argument }}",
+          "counter_source_tier": "{{ steps.classify_counter.result.tier }}",
+          "recomputed_confidence": "{{ steps.recompute_confidence.result.confidence }}",
+          "cross_examination": "{{ steps.cross_examine.result }}"
+        },
+        "community_id": "{{ params.community_id }}"
+      }
+    }
+  ],
+  "output_map": {
+    "challenge_accepted": "{{ steps.validate_challenge.result.accepted }}",
+    "rejection_reason": "{{ steps.validate_challenge.result.rejection_reason }}",
+    "counter_source_tier": "{{ steps.classify_counter.result.tier }}",
+    "previous_confidence": "{{ steps.cross_examine.result.previous_confidence }}",
+    "new_confidence": "{{ steps.recompute_confidence.result.confidence }}",
+    "escalated_to_curator": "{{ steps.recompute_confidence.result.ambiguous }}",
+    "resolution": "{{ steps.escalate.result.resolution }}"
+  }
+}

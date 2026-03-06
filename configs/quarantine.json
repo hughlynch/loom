@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "description": "Novel claim quarantine configuration. Claims from new, unestablished sources enter quarantine and must earn promotion through corroboration.",
+  "reliability_threshold": 0.5,
+  "review_window_days": 30,
+  "quarantine_rules": {
+    "trigger": "novel claim from source with reliability < reliability_threshold",
+    "visibility": "visible in evidence graph, marked as 'unverified - pending corroboration'",
+    "excluded_from_snapshots": true
+  },
+  "auto_promote": {
+    "enabled": true,
+    "condition": "corroborated by T3+ independent source",
+    "promote_to": "reported"
+  },
+  "auto_expire": {
+    "enabled": true,
+    "condition": "no corroboration within review_window_days",
+    "expire_to": "expired_unverified"
+  },
+  "new_origin_defaults": {
+    "initial_reliability": 0.3,
+    "rate_limit_claims_per_day": 10,
+    "topic_concentration_flag_threshold": 50
+  }
+}

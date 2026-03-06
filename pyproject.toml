@@ -1,0 +1,8 @@
+[project]
+name = "loom"
+version = "0.1.0"
+description = "Loom — the ABWP knowledge system"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]

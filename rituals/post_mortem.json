@@ -1,0 +1,84 @@
+{
+  "id": "ritual.loom.post_mortem",
+  "version": "1.0.0",
+  "description": "Investigate and publish a post-mortem for a significant knowledge error -- a claim that was verified or corroborated and later found to be incorrect. Gathers claim history, traces the acquisition path, identifies which pipeline step failed, drafts a post-mortem with structural fix recommendation, and submits for curator review.",
+  "params": [
+    {
+      "name": "claim_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "correcting_evidence_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "community_id",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "steps": [
+    {
+      "id": "gather_history",
+      "skill": "kb.query.claim_history",
+      "skill_version": "1.0.0",
+      "description": "Gather the full history of the claim: all evidence links, confidence changes, related contradictions, and downstream claims that cited it",
+      "context_map": {
+        "claim_id": "{{ params.claim_id }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "trace_pipeline",
+      "skill": "loom.trace.acquisition_path",
+      "skill_version": "1.0.0",
+      "description": "Trace the original acquisition path: which ritual run ingested this claim, what source it came from, how it was classified and corroborated",
+      "depends_on": ["gather_history"],
+      "context_map": {
+        "claim_id": "{{ params.claim_id }}",
+        "evidence_chain": "{{ steps.gather_history.result.evidence_chain }}"
+      }
+    },
+    {
+      "id": "identify_failure",
+      "skill": "loom.analyze.pipeline_failure",
+      "skill_version": "1.0.0",
+      "description": "Identify which step in the acquisition pipeline failed or what gap in the evidence hierarchy permitted the error",
+      "depends_on": ["trace_pipeline"],
+      "context_map": {
+        "acquisition_path": "{{ steps.trace_pipeline.result }}",
+        "correcting_evidence_id": "{{ params.correcting_evidence_id }}"
+      }
+    },
+    {
+      "id": "draft_post_mortem",
+      "skill": "loom.write.post_mortem",
+      "skill_version": "1.0.0",
+      "description": "Draft the post-mortem document: what was wrong, why the system didn't catch it, what evidence corrected it, and what structural change prevents recurrence",
+      "depends_on": ["identify_failure"],
+      "context_map": {
+        "claim_history": "{{ steps.gather_history.result }}",
+        "pipeline_failure": "{{ steps.identify_failure.result }}",
+        "correcting_evidence_id": "{{ params.correcting_evidence_id }}"
+      }
+    },
+    {
+      "id": "curator_review",
+      "skill": "curate.review",
+      "skill_version": "1.0.0",
+      "description": "Submit post-mortem for curator review and approval before publication",
+      "depends_on": ["draft_post_mortem"],
+      "context_map": {
+        "post_mortem": "{{ steps.draft_post_mortem.result }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    }
+  ],
+  "output_map": {
+    "post_mortem": "{{ steps.curator_review.result.approved_post_mortem }}",
+    "structural_fix": "{{ steps.identify_failure.result.recommended_fix }}",
+    "affected_claims": "{{ steps.gather_history.result.downstream_claims }}"
+  }
+}

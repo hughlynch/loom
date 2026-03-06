@@ -1,0 +1,82 @@
+{
+  "version": "1.0.0",
+  "anti_patterns": [
+    {
+      "id": "authority_laundering",
+      "source": "knowledge-acquisition.md",
+      "description": "A low-tier source cites a high-tier source, but the claim it makes is not actually present in the cited source. The intermediary borrows authority it hasn't earned.",
+      "signature": "Follow citation links and verify the cited source actually supports the derived claim. Mismatch between intermediary claim and cited source content.",
+      "remediation": "Score the claim based on the intermediary's tier, not the cited source's tier."
+    },
+    {
+      "id": "consensus_manufacturing",
+      "source": "knowledge-acquisition.md",
+      "description": "Multiple sources making the same claim, but all tracing back to a single original source. Appears to be corroboration but is actually amplification.",
+      "signature": "Track syndication chains. Deduplicate sources by origin and original publication date. Multiple sources with shared origin characteristics making identical novel claims.",
+      "remediation": "Count as one source for corroboration purposes."
+    },
+    {
+      "id": "temporal_confusion",
+      "source": "knowledge-acquisition.md",
+      "description": "Presenting outdated information as current, or mixing claims from different time periods without noting the discrepancy.",
+      "signature": "Compare claim timestamps with valid_until fields and flag mismatches.",
+      "remediation": "Require temporal context on all claims with bounded validity."
+    },
+    {
+      "id": "precision_theater",
+      "source": "knowledge-acquisition.md",
+      "description": "Presenting vague or estimated information with false precision. E.g. 'The project will cost $4,237,891' when the source says 'approximately $4.2 million.'",
+      "signature": "Compare extracted numerical claims against source excerpts for precision inflation.",
+      "remediation": "Preserve the precision level of the original source."
+    },
+    {
+      "id": "missing_denominator",
+      "source": "knowledge-acquisition.md",
+      "description": "Presenting absolute numbers without the base rate or comparison that makes them meaningful. '50 incidents reported' without noting whether that's out of 100 or 100,000.",
+      "signature": "Flag numerical claims that lack a reference frame (percentage, per-capita, year-over-year, compared to what).",
+      "remediation": "Attach contextualizing evidence that provides the denominator."
+    },
+    {
+      "id": "survivorship_sourcing",
+      "source": "knowledge-acquisition.md",
+      "description": "Only finding sources that support a claim because contradicting sources are behind paywalls, taken offline, or not indexed.",
+      "signature": "Track source retrieval failures (404s, paywalls, robot blocks) and flag claims where potential counter-evidence was inaccessible.",
+      "remediation": "Note accessibility gaps in the evidence record. Lower confidence when significant counter-evidence sources were unreachable."
+    },
+    {
+      "id": "trust_by_assertion",
+      "source": "loom-adversarial-resilience.md",
+      "description": "Demanding trust without showing evidence. 'This claim is verified' without a visible provenance chain. Any claim presented without accessible evidence links has failed the most basic defense.",
+      "signature": "Audit snapshot chunks for claims without embedded evidence references.",
+      "remediation": "Block snapshot deployment if any chunk contains a 'verified' or 'corroborated' claim without at least one evidence link."
+    },
+    {
+      "id": "neutrality_theater",
+      "source": "loom-adversarial-resilience.md",
+      "description": "Claiming the system is objective or unbiased rather than transparent. Objectivity is an assertion that invites attack. Transparency is a practice that resists it.",
+      "signature": "Review system-generated descriptions and documentation for claims of neutrality or objectivity.",
+      "remediation": "Replace claims of neutrality with descriptions of process: 'Loom evaluates evidence using a published hierarchy' not 'Loom provides unbiased information.'"
+    },
+    {
+      "id": "error_burial",
+      "source": "loom-adversarial-resilience.md",
+      "description": "Quietly fixing errors instead of publishing corrections. Silent fixes undermine the public changelog and make 'you quietly changed it' a valid attack.",
+      "signature": "Diff snapshots for claim changes that lack corresponding changelog entries.",
+      "remediation": "Block snapshot deployment if claims changed between versions without changelog entries."
+    },
+    {
+      "id": "challenge_suppression",
+      "source": "loom-adversarial-resilience.md",
+      "description": "Making the challenge process difficult to discourage dissent. High barriers to challenge protect the system from flooding but also protect it from legitimate correction.",
+      "signature": "Monitor challenge submission rates, auto-close rates, and time-to-resolution. A sudden drop in challenges may indicate suppression, not satisfaction.",
+      "remediation": "Publish challenge statistics. If auto-close rates exceed 80% for 30 days, review the triage criteria for excessive strictness."
+    },
+    {
+      "id": "authority_capture",
+      "source": "loom-adversarial-resilience.md",
+      "description": "Allowing individual curators unchecked power over claims. A single curator who can resolve contradictions, reclassify sources, and restructure concept maps without review has too much power.",
+      "signature": "Monitor curator activity concentration. Flag when a single curator accounts for >30% of resolutions in a 30-day window.",
+      "remediation": "Require second-curator review when concentration thresholds are exceeded."
+    }
+  ]
+}

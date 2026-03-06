@@ -1,0 +1,89 @@
+{
+  "id": "ritual.knowledge.audit",
+  "version": "1.0.0",
+  "description": "Periodic integrity check of the evidence graph. Scans for orphan claims, offline sources, expired claims, stale contradictions, and degraded sources.",
+  "params": [
+    {
+      "name": "community_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "stale_contradiction_days",
+      "type": "integer",
+      "required": false,
+      "default": 30
+    }
+  ],
+  "steps": [
+    {
+      "id": "find_orphans",
+      "skill": "kb.audit.orphan_claims",
+      "skill_version": "1.0.0",
+      "description": "Find claims with no supporting evidence links (orphans)",
+      "context_map": {
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "check_sources",
+      "skill": "kb.audit.source_availability",
+      "skill_version": "1.0.0",
+      "description": "Check source URLs for availability; detect 404s, paywalls, and robot blocks",
+      "context_map": {
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "find_expired",
+      "skill": "kb.audit.expired_claims",
+      "skill_version": "1.0.0",
+      "description": "Find claims past their temporal validity with no refresh",
+      "context_map": {
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "find_stale_contradictions",
+      "skill": "kb.audit.stale_contradictions",
+      "skill_version": "1.0.0",
+      "description": "Find contradictions unresolved for longer than the configured window",
+      "context_map": {
+        "community_id": "{{ params.community_id }}",
+        "stale_days": "{{ params.stale_contradiction_days }}"
+      }
+    },
+    {
+      "id": "find_degraded_sources",
+      "skill": "kb.audit.degraded_sources",
+      "skill_version": "1.0.0",
+      "description": "Find claims whose sole supporting source has degraded reliability below threshold",
+      "context_map": {
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "compile_report",
+      "skill": "kb.audit.compile_report",
+      "skill_version": "1.0.0",
+      "description": "Compile all audit findings into a structured report for curator review",
+      "depends_on": ["find_orphans", "check_sources", "find_expired", "find_stale_contradictions", "find_degraded_sources"],
+      "context_map": {
+        "orphan_claims": "{{ steps.find_orphans.result }}",
+        "offline_sources": "{{ steps.check_sources.result.offline }}",
+        "expired_claims": "{{ steps.find_expired.result }}",
+        "stale_contradictions": "{{ steps.find_stale_contradictions.result }}",
+        "degraded_sources": "{{ steps.find_degraded_sources.result }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    }
+  ],
+  "output_map": {
+    "orphan_claims_count": "{{ steps.find_orphans.result | length }}",
+    "offline_sources_count": "{{ steps.check_sources.result.offline | length }}",
+    "expired_claims_count": "{{ steps.find_expired.result | length }}",
+    "stale_contradictions_count": "{{ steps.find_stale_contradictions.result | length }}",
+    "degraded_sources_count": "{{ steps.find_degraded_sources.result | length }}",
+    "report": "{{ steps.compile_report.result }}"
+  }
+}

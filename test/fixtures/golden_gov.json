@@ -1,0 +1,39 @@
+{
+  "description": "Golden fixture: US Census Bureau population data page",
+  "source": {
+    "url": "https://www.census.gov/popclock/",
+    "content": "U.S. and World Population Clock\n\nUnited States\n340,110,988\n\nOne birth every 9 seconds\nOne death every 10 seconds\nOne international migrant (net) every 28 seconds\nNet gain of one person every 24 seconds\n\nWorld\n8,118,835,999\n\nU.S. Census Bureau\nCurrent Population",
+    "content_hash": "fixture_hash_placeholder",
+    "content_type": "text/html; charset=utf-8",
+    "status_code": 200
+  },
+  "expected": {
+    "classification": {
+      "tier": "T1",
+      "domain_verified": true,
+      "domain_is_gov": true
+    },
+    "claims": [
+      {
+        "statement": "The U.S. population is approximately 340 million as of 2026",
+        "category": "statistical",
+        "ttl_category": "medium_term"
+      },
+      {
+        "statement": "One birth occurs every 9 seconds in the United States",
+        "category": "statistical",
+        "ttl_category": "medium_term"
+      },
+      {
+        "statement": "The world population is approximately 8.1 billion",
+        "category": "statistical",
+        "ttl_category": "medium_term"
+      }
+    ],
+    "corroboration": {
+      "status": "verified",
+      "confidence_min": 0.85,
+      "confidence_max": 1.0
+    }
+  }
+}

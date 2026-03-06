@@ -1,0 +1,95 @@
+{
+  "id": "ritual.knowledge.refresh",
+  "version": "1.0.0",
+  "description": "Scheduled re-verification of knowledge claims. Scans for claims approaching temporal expiration, re-harvests their sources, checks content hashes for changes, and updates claims whose sources have changed. Frequency: daily for T1/T2, weekly for T3, monthly for T4+.",
+  "params": [
+    {
+      "name": "community_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "max_tier",
+      "type": "integer",
+      "required": false,
+      "default": 7
+    },
+    {
+      "name": "expiry_window_days",
+      "type": "integer",
+      "required": false,
+      "default": 30
+    }
+  ],
+  "steps": [
+    {
+      "id": "scan_expiring",
+      "skill": "kb.query.expiring_claims",
+      "skill_version": "1.0.0",
+      "description": "Find claims approaching their temporal validity expiration within the configured window",
+      "context_map": {
+        "community_id": "{{ params.community_id }}",
+        "expiry_window_days": "{{ params.expiry_window_days }}",
+        "max_tier": "{{ params.max_tier }}"
+      }
+    },
+    {
+      "id": "reharvest",
+      "skill": "harvest.web",
+      "skill_version": "1.0.0",
+      "description": "Re-harvest source URLs for each expiring claim to get fresh content",
+      "depends_on": ["scan_expiring"],
+      "for_each": "{{ steps.scan_expiring.result.sources }}",
+      "context_map": {
+        "url": "{{ item.url }}",
+        "community_id": "{{ params.community_id }}",
+        "previous_content_hash": "{{ item.content_hash }}"
+      }
+    },
+    {
+      "id": "check_hashes",
+      "skill": "corroborate.check_content_hash",
+      "skill_version": "1.0.0",
+      "description": "Compare re-harvested content hashes against stored hashes to detect changes",
+      "depends_on": ["reharvest"],
+      "for_each": "{{ steps.reharvest.result }}",
+      "context_map": {
+        "source_id": "{{ item.source_id }}",
+        "old_hash": "{{ item.previous_content_hash }}",
+        "new_hash": "{{ item.content_hash }}",
+        "content": "{{ item.content }}"
+      }
+    },
+    {
+      "id": "update_claims",
+      "skill": "kb.update.refresh_claims",
+      "skill_version": "1.0.0",
+      "description": "Update claims whose sources have changed; recompute confidence levels; mark superseded claims",
+      "depends_on": ["check_hashes"],
+      "context_map": {
+        "changed_sources": "{{ steps.check_hashes.result.changed }}",
+        "unchanged_sources": "{{ steps.check_hashes.result.unchanged }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "update_fixtures",
+      "skill": "kb.build.refresh_fixtures",
+      "skill_version": "1.0.0",
+      "description": "Re-verify golden fixtures whose source claims were updated",
+      "depends_on": ["update_claims"],
+      "condition": "{{ steps.update_claims.result.updated_claim_ids | length }}",
+      "context_map": {
+        "updated_claim_ids": "{{ steps.update_claims.result.updated_claim_ids }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    }
+  ],
+  "output_map": {
+    "sources_checked": "{{ steps.reharvest.result | length }}",
+    "sources_changed": "{{ steps.check_hashes.result.changed | length }}",
+    "claims_updated": "{{ steps.update_claims.result.updated_claim_ids }}",
+    "claims_expired": "{{ steps.update_claims.result.expired_claim_ids }}",
+    "fixtures_refreshed": "{{ steps.update_fixtures.result.refreshed_count }}"
+  }
+}

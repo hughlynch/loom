@@ -1,0 +1,68 @@
+{
+  "version": "1.0.0",
+  "tiers": [
+    {
+      "tier": 1,
+      "name": "primary_records",
+      "description": "Official documents with legal standing",
+      "examples": ["Government filings", "court records", "legislation text", "certified meeting minutes", "property records", "inspection reports"],
+      "weight": "highest",
+      "domain_verification_required": true
+    },
+    {
+      "tier": 2,
+      "name": "institutional_data",
+      "description": "Structured data from authoritative institutions",
+      "examples": ["Census data", "EPA measurements", "school enrollment figures", "financial disclosures", "election results"],
+      "weight": "high",
+      "domain_verification_required": true
+    },
+    {
+      "tier": 3,
+      "name": "authoritative_reporting",
+      "description": "Journalism with editorial standards and accountability",
+      "examples": ["Established newspapers", "wire services (AP, Reuters)", "public broadcasting"],
+      "weight": "moderate_high",
+      "domain_verification_required": false
+    },
+    {
+      "tier": 4,
+      "name": "expert_analysis",
+      "description": "Domain expertise with credentials and methodology",
+      "examples": ["Academic papers", "think tank reports (with disclosed funding)", "professional associations"],
+      "weight": "moderate",
+      "domain_verification_required": false
+    },
+    {
+      "tier": 5,
+      "name": "structured_community_input",
+      "description": "Verified local knowledge with identity accountability",
+      "examples": ["Resident reports on Weft (verified identity)", "community board testimony", "public comment (attributed)"],
+      "weight": "moderate",
+      "domain_verification_required": false
+    },
+    {
+      "tier": 6,
+      "name": "unstructured_digital_content",
+      "description": "General web content without editorial standards",
+      "examples": ["Blog posts", "social media", "forums", "wikis (non-Wikipedia)", "press releases", "marketing materials"],
+      "weight": "low",
+      "domain_verification_required": false
+    },
+    {
+      "tier": 7,
+      "name": "anonymous_unverified",
+      "description": "Content with no accountability chain",
+      "examples": ["Anonymous posts", "unattributed claims", "forwarded content with no original source"],
+      "weight": "lowest",
+      "domain_verification_required": false
+    }
+  ],
+  "rules": {
+    "t1_overrides_any_t6": true,
+    "corroboration_minimum_tier": 3,
+    "corroboration_minimum_count": 2,
+    "mirror_inherits_no_weight": true,
+    "tier_is_per_claim_not_per_outlet": true
+  }
+}

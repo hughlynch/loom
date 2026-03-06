@@ -1,0 +1,56 @@
+{
+  "version": "1.0.0",
+  "rubrics": [
+    {
+      "id": "publisher_credibility",
+      "description": "Evaluates the credibility of the publishing entity",
+      "signals": [
+        {"signal": "Established institution with editorial process", "score_boost": 2, "score_penalty": 0},
+        {"signal": "Named author with verifiable credentials", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Corrections/retractions policy visible", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Funding/ownership disclosed", "score_boost": 1, "score_penalty": 0},
+        {"signal": "No byline or institutional attribution", "score_boost": 0, "score_penalty": -1},
+        {"signal": "Known history of retracted claims in our KB", "score_boost": 0, "score_penalty": -2},
+        {"signal": "Content is primarily promotional/advocacy", "score_boost": 0, "score_penalty": -1}
+      ]
+    },
+    {
+      "id": "claim_verifiability",
+      "description": "Evaluates whether the claims made can be independently verified",
+      "signals": [
+        {"signal": "Cites primary sources that can be checked", "score_boost": 2, "score_penalty": 0},
+        {"signal": "Includes specific dates, figures, names", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Methodology described for data claims", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Vague attribution (\"experts say\", \"studies show\")", "score_boost": 0, "score_penalty": -2},
+        {"signal": "No sources cited", "score_boost": 0, "score_penalty": -2},
+        {"signal": "Claims unverifiable by design (anonymous sources for non-safety matters)", "score_boost": 0, "score_penalty": -1}
+      ]
+    },
+    {
+      "id": "internal_consistency",
+      "description": "Evaluates whether the source is internally coherent",
+      "signals": [
+        {"signal": "Claims within the piece are consistent", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Headline matches body content", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Data in text matches data in cited sources", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Headline contradicts or exaggerates body", "score_boost": 0, "score_penalty": -2},
+        {"signal": "Internal contradictions in the piece", "score_boost": 0, "score_penalty": -2}
+      ]
+    },
+    {
+      "id": "independence",
+      "description": "Evaluates whether the source has conflicts of interest",
+      "signals": [
+        {"signal": "Publisher has no financial interest in the claim", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Source is not the subject of its own claims", "score_boost": 1, "score_penalty": 0},
+        {"signal": "Publisher has direct financial interest in the claim", "score_boost": 0, "score_penalty": -2},
+        {"signal": "Press release or marketing material", "score_boost": 0, "score_penalty": -2}
+      ]
+    }
+  ],
+  "scoring": {
+    "output_field": "reliability",
+    "range": [0.0, 1.0],
+    "feeds_into": "source.reliability and tier assignment"
+  }
+}

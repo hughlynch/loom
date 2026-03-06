@@ -1,0 +1,106 @@
+{
+  "id": "ritual.knowledge.acquire",
+  "version": "1.0.0",
+  "description": "Acquire, validate, and integrate knowledge from a source into the knowledge base with full provenance. Pipeline: harvest raw content, classify source tier, extract structured claims, corroborate against existing KB, adjudicate contradictions, escalate contested claims to human curators.",
+  "params": [
+    {
+      "name": "source_url",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "source_type",
+      "type": "string",
+      "required": false,
+      "default": "auto"
+    },
+    {
+      "name": "community_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "topic_hint",
+      "type": "string",
+      "required": false
+    }
+  ],
+  "steps": [
+    {
+      "id": "harvest",
+      "skill": "harvest.web",
+      "skill_version": "1.0.0",
+      "description": "Retrieve raw content from the source URL, compute content hash",
+      "context_map": {
+        "url": "{{ params.source_url }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "classify_source",
+      "skill": "classify.source_tier",
+      "skill_version": "1.0.0",
+      "description": "Classify the source using evidence hierarchy (T1-T7) and source rubrics",
+      "depends_on": ["harvest"],
+      "context_map": {
+        "content": "{{ steps.harvest.result.content }}",
+        "url": "{{ params.source_url }}",
+        "source_type": "{{ params.source_type }}"
+      }
+    },
+    {
+      "id": "extract",
+      "skill": "extract.claims",
+      "skill_version": "1.0.0",
+      "description": "Extract structured claims, entities, and relationships from raw content",
+      "depends_on": ["harvest", "classify_source"],
+      "context_map": {
+        "content": "{{ steps.harvest.result.content }}",
+        "source_tier": "{{ steps.classify_source.result.tier }}",
+        "topic_hint": "{{ params.topic_hint }}"
+      }
+    },
+    {
+      "id": "corroborate",
+      "skill": "corroborate.check",
+      "skill_version": "1.0.0",
+      "description": "Cross-reference each extracted claim against the existing KB and find contradictions",
+      "depends_on": ["extract"],
+      "for_each": "{{ steps.extract.result.claims }}",
+      "context_map": {
+        "claim": "{{ item }}",
+        "community_id": "{{ params.community_id }}",
+        "source_tier": "{{ steps.classify_source.result.tier }}"
+      }
+    },
+    {
+      "id": "adjudicate",
+      "skill": "adjudicate.resolve",
+      "skill_version": "1.0.0",
+      "description": "Resolve contradictions using the evidence hierarchy; compute confidence levels deterministically",
+      "depends_on": ["corroborate"],
+      "context_map": {
+        "corroboration_results": "{{ steps.corroborate.result }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "escalate",
+      "skill": "curate.review",
+      "skill_version": "1.0.0",
+      "description": "Escalate contested or ambiguous claims to human curator for review",
+      "depends_on": ["adjudicate"],
+      "condition": "{{ steps.adjudicate.result.contested | length }}",
+      "context_map": {
+        "contested_claims": "{{ steps.adjudicate.result.contested }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    }
+  ],
+  "output_map": {
+    "integrated": "{{ steps.adjudicate.result.integrated }}",
+    "contested": "{{ steps.adjudicate.result.contested }}",
+    "rejected": "{{ steps.adjudicate.result.rejected }}",
+    "source_record": "{{ steps.classify_source.result }}"
+  }
+}

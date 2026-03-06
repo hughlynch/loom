@@ -1,0 +1,143 @@
+{
+  "id": "ritual.knowledge.snapshot_build",
+  "version": "1.0.0",
+  "description": "Build a knowledge snapshot from the evidence graph. Compiles the evidence graph by resolving confidence levels, collapsing superseded chains, filtering expired claims, chunking for retrieval, building indexes, running golden fixture tests, and packaging the immutable versioned artifact.",
+  "params": [
+    {
+      "name": "domain_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "triggered_by",
+      "type": "string",
+      "required": true,
+      "description": "change_event | scheduled | manual"
+    },
+    {
+      "name": "change_events",
+      "type": "array",
+      "required": false,
+      "description": "List of change events that triggered this build"
+    },
+    {
+      "name": "previous_version",
+      "type": "integer",
+      "required": false,
+      "description": "Version of the currently deployed snapshot"
+    }
+  ],
+  "steps": [
+    {
+      "id": "resolve",
+      "skill": "kb.build.resolve",
+      "skill_version": "1.0.0",
+      "description": "Compute current confidence levels for all claims from the evidence graph",
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}",
+        "change_events": "{{ params.change_events }}"
+      }
+    },
+    {
+      "id": "collapse",
+      "skill": "kb.build.collapse",
+      "skill_version": "1.0.0",
+      "description": "Merge superseded claim chains into current claims, preserving history links",
+      "depends_on": ["resolve"],
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}",
+        "resolved_claims": "{{ steps.resolve.result.claims }}"
+      }
+    },
+    {
+      "id": "filter",
+      "skill": "kb.build.filter",
+      "skill_version": "1.0.0",
+      "description": "Remove expired claims and apply domain-specific inclusion rules",
+      "depends_on": ["collapse"],
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}",
+        "collapsed_claims": "{{ steps.collapse.result.claims }}"
+      }
+    },
+    {
+      "id": "resolve_deps",
+      "skill": "kb.build.resolve_dependencies",
+      "skill_version": "1.0.0",
+      "description": "Resolve cross-domain snapshot dependencies (runs in parallel with claim processing)",
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}"
+      }
+    },
+    {
+      "id": "chunk",
+      "skill": "kb.build.chunk",
+      "skill_version": "1.0.0",
+      "description": "Generate retrieval-optimized text segments from resolved claims with baked-in confidence metadata",
+      "depends_on": ["filter", "resolve_deps"],
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}",
+        "claims": "{{ steps.filter.result.claims }}",
+        "dependencies": "{{ steps.resolve_deps.result.snapshots }}"
+      }
+    },
+    {
+      "id": "index",
+      "skill": "kb.build.index",
+      "skill_version": "1.0.0",
+      "description": "Build vector embeddings (FAISS) and full-text search indexes (FTS5) from chunks",
+      "depends_on": ["chunk"],
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}",
+        "chunks": "{{ steps.chunk.result.chunks }}"
+      }
+    },
+    {
+      "id": "test",
+      "skill": "kb.build.test",
+      "skill_version": "1.0.0",
+      "description": "Run golden fixtures against the snapshot to verify factual accuracy, confidence correctness, regression safety, and negative cases",
+      "depends_on": ["index"],
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}",
+        "snapshot_path": "{{ steps.index.result.snapshot_path }}",
+        "previous_version": "{{ params.previous_version }}"
+      }
+    },
+    {
+      "id": "generate_changelog",
+      "skill": "kb.build.changelog",
+      "skill_version": "1.0.0",
+      "description": "Generate changelog diffing this build against the previous snapshot version",
+      "depends_on": ["test"],
+      "condition": "{{ steps.test.result.passed }}",
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}",
+        "snapshot_path": "{{ steps.index.result.snapshot_path }}",
+        "previous_version": "{{ params.previous_version }}",
+        "resolved_claims": "{{ steps.resolve.result.claims }}"
+      }
+    },
+    {
+      "id": "package",
+      "skill": "kb.build.package",
+      "skill_version": "1.0.0",
+      "description": "Assemble the immutable snapshot artifact with version, manifest, changelog, and integrity hashes",
+      "depends_on": ["generate_changelog"],
+      "context_map": {
+        "domain_id": "{{ params.domain_id }}",
+        "snapshot_path": "{{ steps.index.result.snapshot_path }}",
+        "test_report": "{{ steps.test.result }}",
+        "changelog": "{{ steps.generate_changelog.result }}",
+        "previous_version": "{{ params.previous_version }}"
+      }
+    }
+  ],
+  "output_map": {
+    "version": "{{ steps.package.result.version }}",
+    "snapshot_path": "{{ steps.package.result.artifact_path }}",
+    "test_report": "{{ steps.test.result }}",
+    "build_failed": "{{ steps.test.result.passed | not }}",
+    "changelog": "{{ steps.generate_changelog.result }}"
+  }
+}

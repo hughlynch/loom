@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "gates": {
+    "safety": {"type": "binary", "required": true},
+    "architecture": {"type": "binary", "required": true},
+    "style": {"type": "binary", "required": true},
+    "protocol_compliance": {"type": "binary", "required": true}
+  },
+  "scores": {
+    "correctness": {"weight": 0.25},
+    "impact": {"weight": 0.25},
+    "scope": {"weight": 0.20},
+    "testing": {"weight": 0.15},
+    "completeness": {"weight": 0.15}
+  },
+  "thresholds": {
+    "pass": 0.70,
+    "strong_pass": 0.92
+  }
+}

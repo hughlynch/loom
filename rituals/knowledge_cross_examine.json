@@ -1,0 +1,96 @@
+{
+  "id": "ritual.knowledge.cross_examine",
+  "version": "1.0.0",
+  "description": "Active verification for high-stakes claims. Searches for additional evidence not yet in the KB, checks if primary sources have been updated, looks for expert commentary, and attempts data verification against original datasets. Triggered on-demand for claims cited in reports, used in proposals, or contested by community members.",
+  "params": [
+    {
+      "name": "claim_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "community_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "trigger_reason",
+      "type": "string",
+      "required": false,
+      "default": "manual"
+    }
+  ],
+  "steps": [
+    {
+      "id": "load_claim",
+      "skill": "kb.query.claim_detail",
+      "skill_version": "1.0.0",
+      "description": "Load the full claim with its current evidence chain and confidence level",
+      "context_map": {
+        "claim_id": "{{ params.claim_id }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "search_new_evidence",
+      "skill": "harvest.search",
+      "skill_version": "1.0.0",
+      "description": "Search for the claim in sources not yet in the KB",
+      "depends_on": ["load_claim"],
+      "context_map": {
+        "statement": "{{ steps.load_claim.result.statement }}",
+        "category": "{{ steps.load_claim.result.category }}",
+        "existing_source_ids": "{{ steps.load_claim.result.source_ids }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    },
+    {
+      "id": "check_primary_updates",
+      "skill": "harvest.web",
+      "skill_version": "1.0.0",
+      "description": "Re-harvest primary sources to check for updates since last retrieval",
+      "depends_on": ["load_claim"],
+      "for_each": "{{ steps.load_claim.result.primary_sources }}",
+      "context_map": {
+        "url": "{{ item.url }}",
+        "community_id": "{{ params.community_id }}",
+        "previous_content_hash": "{{ item.content_hash }}"
+      }
+    },
+    {
+      "id": "classify_new_sources",
+      "skill": "classify.source_tier",
+      "skill_version": "1.0.0",
+      "description": "Classify any newly discovered sources",
+      "depends_on": ["search_new_evidence"],
+      "condition": "{{ steps.search_new_evidence.result.new_sources | length }}",
+      "for_each": "{{ steps.search_new_evidence.result.new_sources }}",
+      "context_map": {
+        "content": "{{ item.content }}",
+        "url": "{{ item.url }}",
+        "source_type": "auto"
+      }
+    },
+    {
+      "id": "recompute_confidence",
+      "skill": "corroborate.check",
+      "skill_version": "1.0.0",
+      "description": "Recompute the claim confidence with all evidence (existing + newly found)",
+      "depends_on": ["classify_new_sources", "check_primary_updates"],
+      "context_map": {
+        "claim": "{{ steps.load_claim.result }}",
+        "new_sources": "{{ steps.classify_new_sources.result }}",
+        "primary_updates": "{{ steps.check_primary_updates.result }}",
+        "community_id": "{{ params.community_id }}"
+      }
+    }
+  ],
+  "output_map": {
+    "claim_id": "{{ params.claim_id }}",
+    "previous_confidence": "{{ steps.load_claim.result.confidence }}",
+    "new_confidence": "{{ steps.recompute_confidence.result.confidence }}",
+    "new_sources_found": "{{ steps.search_new_evidence.result.new_sources | length }}",
+    "primary_source_changed": "{{ steps.check_primary_updates.result.any_changed }}",
+    "evidence_summary": "{{ steps.recompute_confidence.result.evidence_summary }}"
+  }
+}

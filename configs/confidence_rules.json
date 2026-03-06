@@ -1,0 +1,37 @@
+{
+  "version": "1.0.0",
+  "levels": ["verified", "corroborated", "reported", "contested", "unverified"],
+  "rules": [
+    {
+      "level": "verified",
+      "condition": "any T1/T2 supports AND no T1/T2 contradicts",
+      "priority": 1
+    },
+    {
+      "level": "corroborated",
+      "condition": "2+ independent T3+ support AND none contradict at higher tier",
+      "priority": 2
+    },
+    {
+      "level": "contested",
+      "condition": "any supports AND any contradicts",
+      "priority": 3,
+      "side_effect": "create_contradiction_record"
+    },
+    {
+      "level": "reported",
+      "condition": "1 T3+ supports OR 2+ T4/T5 support",
+      "priority": 4
+    },
+    {
+      "level": "unverified",
+      "condition": "default",
+      "priority": 5
+    }
+  ],
+  "independence": {
+    "same_publisher_not_independent": true,
+    "syndication_chain_not_independent": true,
+    "track_origin_publisher": true
+  }
+}
