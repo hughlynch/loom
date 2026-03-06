@@ -54,18 +54,29 @@ loom/
 
 ## Worker Skill Map
 
-| Worker | Skills |
-|--------|--------|
-| Harvester | `harvest.web`, `harvest.api`, `harvest.document` |
-| Extractor | `extract.claims`, `extract.entities`, `extract.relationships` |
-| Classifier | `classify.source_tier`, `classify.topic`, `classify.temporal_validity` |
-| Corroborator | `corroborate.check`, `corroborate.find_contradictions` |
-| Adjudicator | `adjudicate.resolve`, `adjudicate.escalate`, `adjudicate.triage_challenge` |
-| Curator | `curate.review`, `curate.approve`, `curate.reject` |
-| KB | `loom.kb.search`, `loom.kb.query_claim`, `loom.kb.claim_history`, `loom.kb.store_claim` |
-| Snapshot | `loom.snapshot.build`, `loom.snapshot.test`, `loom.snapshot.promote` |
-| Tutor | `loom.tutor.assess`, `loom.tutor.teach`, `loom.tutor.verify` |
-| Monitor | `loom.monitor.source_rates`, `loom.monitor.challenge_health` |
+| Worker | Skills | Status |
+|--------|--------|--------|
+| Harvester | `harvest.web`, `harvest.api`, `harvest.document` | web+api real, document stub |
+| Extractor | `extract.claims`, `extract.entities`, `extract.relationships` | claims+entities heuristic, relationships stub |
+| Classifier | `classify.source_tier`, `classify.claim_type`, `classify.topic`, `classify.temporal_validity` | tier+claim_type+temporal real, topic stub |
+| Corroborator | `corroborate.check`, `corroborate.find_contradictions` | both real (deterministic) |
+| Adjudicator | `adjudicate.resolve`, `adjudicate.escalate`, `adjudicate.triage_challenge` | all stubs |
+| Curator | `curate.review`, `curate.approve`, `curate.reject` | all stubs |
+| KB | `loom.kb.search`, `loom.kb.query_claim`, `loom.kb.claim_history`, `loom.kb.store_claim`, `loom.kb.update_claim`, `loom.kb.find_similar`, `loom.kb.record_contradiction` | all real (SQLite) |
+| Snapshot | `loom.snapshot.build`, `loom.snapshot.test`, `loom.snapshot.promote` | all stubs |
+| Tutor | `loom.tutor.assess`, `loom.tutor.teach`, `loom.tutor.verify` | all stubs |
+| Monitor | `loom.monitor.source_rates`, `loom.monitor.challenge_health` | all stubs |
+
+## Pipeline CLI
+
+```bash
+# Acquire claims from a URL
+PYTHONPATH=~/grove/python python3 pipeline.py https://www.usa.gov/about-the-us
+
+# With custom DB and claim limit
+PYTHONPATH=~/grove/python python3 pipeline.py https://apnews.com/article/123 \
+  --db /tmp/loom.db --max-claims 20
+```
 
 ## Evidence Hierarchy (T1-T7)
 

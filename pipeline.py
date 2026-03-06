@@ -21,6 +21,27 @@ from workers.corroborator.worker import (
 from workers.kb.worker import LoomKBWorker
 
 
+def _print_result(result):
+    """Pretty-print pipeline result."""
+    if result.get("errors"):
+        print(f"ERRORS: {result['errors']}")
+        return
+
+    s = result.get("summary", {})
+    print(f"\nURL: {s.get('url', '?')}")
+    print(f"Tier: {s.get('tier', '?')}")
+    print(f"Claims stored: {s.get('claims_stored', 0)} / {s.get('claims_total', 0)}")
+    print()
+
+    for i, c in enumerate(result.get("claims", []), 1):
+        status = c.get("status", "?")
+        conf = c.get("confidence", 0)
+        ctype = c.get("claim_type", "?")
+        print(f"  [{i}] ({status}, {conf:.2f}, {ctype}) {c['statement'][:120]}")
+
+    print()
+
+
 class _Handle:
     """Minimal handle for direct worker invocation."""
     def __init__(self, params):
@@ -141,3 +162,17 @@ def acquire(url: str, db_path: str = "", max_claims: int = 50) -> dict:
     }
 
     return result
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Loom acquisition pipeline")
+    parser.add_argument("url", help="URL to harvest and process")
+    parser.add_argument("--db", default="", help="SQLite database path")
+    parser.add_argument("--max-claims", type=int, default=20,
+                        help="Max claims to extract (default: 20)")
+    args = parser.parse_args()
+
+    result = acquire(args.url, db_path=args.db, max_claims=args.max_claims)
+    _print_result(result)

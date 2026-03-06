@@ -87,7 +87,11 @@ _QUESTION_PATTERN = re.compile(r'\?$')
 _COMMAND_PATTERN = re.compile(r'^(Click|Subscribe|Sign up|Follow|Share|Enter|Visit)\b', re.I)
 _BOILERPLATE = re.compile(
     r'^(Copyright|All rights reserved|Terms of|Privacy|Cookie|'
-    r'Advertisement|Loading|JavaScript|This site)\b', re.I
+    r'Advertisement|Loading|JavaScript|This site|Yes No|'
+    r'Comments or|Thank you for|Subscribe|Sign up|Share|'
+    r'An official website|Secure \.gov|Here\'s how|'
+    r'characters maximum|Close|Skip to|Menu|Navigation|'
+    r'NO THANKS)\b', re.I
 )
 _TOO_SHORT = 20  # Minimum chars for a viable claim
 _TOO_LONG = 500  # Maximum chars for an atomic claim

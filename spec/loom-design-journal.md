@@ -191,3 +191,57 @@ numbers — fixed by excluding numeric words from the LIKE
 search.
 
 69 Python tests, all green.
+
+## 2026-03-06: Momentum i5 — live test, CLI, docs
+
+Ran the pipeline live against usa.gov. Full chain works:
+HTTP fetch → HTML strip → sentence segment → claim filter →
+classify (T1) → corroborate (verified, 0.97) → store to
+SQLite. Census.gov PopClock returns JS-heavy content (claims
+are boilerplate); static .gov pages work better.
+
+Added pipeline CLI: `python3 pipeline.py <url>` runs the
+full acquisition pipeline and prints stored claims.
+
+Updated AGENTS.md skill map with status column showing
+which skills are real vs stub. Added 3 new KB skills
+(update_claim, find_similar, record_contradiction) and
+classify.claim_type.
+
+Improved boilerplate filter: reject "An official website",
+"Secure .gov websites", "YES NO", "characters maximum", etc.
+
+## 2026-03-06: Phase 1 complete — reflection
+
+Five momentum iterations produced:
+- **6 real workers** (harvester, extractor, classifier,
+  corroborator, KB with 7 skills, pipeline module)
+- **69 Python tests + Go E2E suite**, all green
+- **2 golden fixtures** (census.gov T1, AP News T3)
+- **Live integration** proven against real .gov URLs
+- **KB integrity**: dedup, contradiction detection, contested
+  propagation, version tracking, temporal validity
+
+What's working well:
+- Deterministic confidence computation is clean and testable
+- Heuristic claim extraction (no LLM needed) catches explicit
+  factual assertions
+- Domain-based tier classification is fast and accurate for
+  known domains
+- Dedup + contradiction pipeline prevents data quality rot
+
+What needs work (Phase 2):
+- Extractor quality: heuristic approach misses implicit claims,
+  produces some boilerplate. LLM integration (LOOM_MODEL) would
+  dramatically improve extraction quality.
+- Rubric scoring for T3-T7: currently just domain matching.
+  Content analysis (editorial standards, author credentials)
+  needs LLM or curated rubric data.
+- Dual-axis schema (source reliability × information credibility)
+  from architectural recommendations.
+- ClaimReview export for interoperability.
+- Warrant tracking (Toulmin gap).
+
+has_next: true — the foundation is solid and Phase 2 work
+(dual-axis, LLM extraction, ClaimReview) is clearly scoped.
+But this is a natural pause point.

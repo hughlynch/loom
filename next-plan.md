@@ -1,28 +1,28 @@
 # Loom — Next Plan
 
-## Iteration 5: Live integration test + AGENTS.md skill map update
+## Phase 2: Dual-Axis Schema + LLM Extraction
 
-The foundation is built. Four iterations of momentum have
-produced a working pipeline with 69 tests. Time to prove it
-works end-to-end with live HTTP, then clean up the docs.
+From architectural-recommendations.md Phase 2 (schema change):
 
-1. **Live integration test** — Fetch a real .gov URL, extract
-   claims, classify, corroborate, store. Verify the full chain
-   works against a live server (not just fixtures).
+1. **Information credibility axis (C1-C6)** — Add second axis
+   alongside source reliability (T1-T7). Each evidence link
+   gets an independent credibility assessment.
 
-2. **Update AGENTS.md** — Skill map is outdated (doesn't list
-   new skills: classify.claim_type, loom.kb.find_similar,
-   loom.kb.record_contradiction, loom.kb.update_claim).
+2. **LLM-backed extraction** — Replace heuristic extractor with
+   LLM calls (LOOM_MODEL) for higher-quality claim extraction.
+   Keep heuristic as fallback when no API key is set.
 
-3. **Pipeline CLI** — Make `pipeline.py` runnable from command
-   line: `python3 pipeline.py <url>` prints stored claims.
+3. **GRADE-like adjustment factors** — Add up/down modifiers to
+   confidence computation: risk_of_bias, inconsistency,
+   indirectness, imprecision, publication_bias (down);
+   large_effect, dose_response (up).
 
-4. **Reflection** — Update next-plan with Phase 2 roadmap
-   (dual-axis schema, warrant tracking, ClaimReview export).
-   Assess whether to continue or pause here.
+4. **Structured disagreement model** — Replace binary "contested"
+   with evidence_strength × agreement_level matrix (IPCC-inspired).
 
-## Success criteria
-- Live test fetches real URL and stores claims
-- AGENTS.md accurately reflects current capabilities
-- Pipeline is usable from command line
-- has_next evaluated honestly
+5. **ClaimReview export** — Schema.org ClaimReview format for
+   interoperability with fact-checking ecosystem.
+
+## has_next
+true — Phase 2 is clearly scoped and builds on proven foundation.
+Natural pause point between phases.
