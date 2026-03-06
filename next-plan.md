@@ -1,29 +1,30 @@
 # Loom — Next Plan
 
-## Iteration 2: Claim-type classification + temporal model
+## Iteration 3: Extractor worker (heuristic claim extraction)
 
-From architectural-recommendations.md Phase 1 (no arch change needed):
+The extractor is the missing link in the pipeline. Without it,
+claims must be manually specified. Build a heuristic extractor
+that works without LLM calls (pattern-based), then wire the
+full automated pipeline: URL → harvest → classify → extract →
+corroborate → store.
 
-1. **Claim-type classification** — Add `classify.claim_type` skill to
-   classifier that categorizes claims as empirical_fact, statistical,
-   causal, prediction, opinion, attribution, or temporal. Different
-   claim types get different assessment methods and TTL defaults.
+1. **Heuristic claim extraction** — `extract.claims` skill that
+   finds factual assertions in text using sentence segmentation
+   and heuristic filters (discard questions, commands, fragments).
 
-2. **Temporal validity model** — Enhance `classify.temporal_validity`
-   to compute real validity windows based on claim type and source date.
-   Add `valid_from`, `valid_until`, `temporal_status` (current/outdated/
-   superseded) to KB schema.
+2. **Entity extraction** — `extract.entities` skill that finds
+   named entities (people, orgs, places, numbers) using regex
+   patterns. Not NER-quality, but sufficient for pipeline wiring.
 
-3. **KB update_claim skill** — Add ability to update an existing claim's
-   confidence/status when new evidence arrives (with version tracking).
+3. **Automated pipeline function** — Python module that chains
+   all workers: given a URL, produce stored claims with provenance.
 
-4. **Multi-source corroboration test** — Golden fixture with same claim
-   from 2+ sources at different tiers, verifying corroboration boost
-   and independence check.
+4. **Second golden fixture** — AP News article fixture exercising
+   the full automated pipeline (T3 source, multiple claims).
 
 ## Success criteria
-- Claim-type classifier assigns correct types to test claims
-- Temporal validity windows match expected TTL for each claim type
-- KB supports claim updates with version history
-- Multi-source corroboration test demonstrates confidence boost
-- All tests pass (target: 30+ Python tests)
+- Extractor produces sensible claims from real text
+- Entity extraction finds named entities
+- Automated pipeline runs URL → stored claims without manual steps
+- Two golden fixtures pass (gov T1 + news T3)
+- All tests pass (target: 50+ Python tests)

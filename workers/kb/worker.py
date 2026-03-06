@@ -361,6 +361,120 @@ class LoomKBWorker(Worker):
             db.close()
 
 
+    @skill("loom.kb.update_claim", "Update an existing claim with new evidence")
+    def kb_update_claim(self, handle):
+        """Update an existing claim's confidence/status with new evidence.
+
+        Creates a version record tracking the change, optionally adds new
+        evidence links.
+
+        Params (from handle.params):
+            claim_id (str): The claim to update.
+            confidence (float, optional): New confidence score.
+            status (str, optional): New status.
+            change_reason (str): Why this update is being made.
+            evidence (list, optional): New evidence links to add.
+
+        Returns:
+            dict with claim_id, updated (bool), version_id.
+        """
+        params = handle.params
+        claim_id = params.get("claim_id", "")
+        change_reason = params.get("change_reason", "")
+
+        if not claim_id:
+            return {"error": "claim_id is required", "updated": False}
+        if not change_reason:
+            return {"error": "change_reason is required", "updated": False}
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            # Verify claim exists
+            row = db.execute(
+                "SELECT * FROM claims WHERE claim_id = ?", (claim_id,)
+            ).fetchone()
+            if not row:
+                return {"error": f"claim {claim_id} not found", "updated": False}
+
+            now = _now_iso()
+
+            # Build update fields
+            updates = []
+            values = []
+            new_confidence = params.get("confidence")
+            new_status = params.get("status")
+
+            if new_confidence is not None:
+                updates.append("confidence = ?")
+                values.append(new_confidence)
+            if new_status is not None:
+                updates.append("status = ?")
+                values.append(new_status)
+
+            updates.append("updated_at = ?")
+            values.append(now)
+            values.append(claim_id)
+
+            db.execute(
+                f"UPDATE claims SET {', '.join(updates)} WHERE claim_id = ?",
+                values,
+            )
+
+            # Create version record
+            version_id = _generate_id("ver", claim_id + now + change_reason)
+            db.execute(
+                "INSERT INTO claim_versions "
+                "(version_id, claim_id, statement, confidence, status, "
+                "changed_by, change_reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    version_id,
+                    claim_id,
+                    row["statement"],
+                    new_confidence if new_confidence is not None else row["confidence"],
+                    new_status if new_status is not None else row["status"],
+                    "system",
+                    change_reason,
+                    now,
+                ),
+            )
+
+            # Add new evidence links
+            evidence_list = params.get("evidence", [])
+            for ev in evidence_list:
+                evidence_id = _generate_id(
+                    "ev", claim_id + ev.get("source_url", "") + now
+                )
+                db.execute(
+                    "INSERT INTO evidence "
+                    "(evidence_id, claim_id, source_url, source_tier, "
+                    "content_hash, excerpt, retrieved_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        evidence_id,
+                        claim_id,
+                        ev.get("source_url", ""),
+                        ev.get("source_tier", ""),
+                        ev.get("content_hash", ""),
+                        ev.get("excerpt", ""),
+                        ev.get("retrieved_at", now),
+                        now,
+                    ),
+                )
+
+            db.commit()
+            return {
+                "claim_id": claim_id,
+                "updated": True,
+                "version_id": version_id,
+            }
+        except Exception as e:
+            db.rollback()
+            return {"error": str(e), "updated": False}
+        finally:
+            db.close()
+
+
 worker = LoomKBWorker(worker_id="loom-kb-1")
 
 if __name__ == "__main__":

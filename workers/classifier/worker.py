@@ -8,7 +8,7 @@ weight in adjudication.
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from grove.uwp import Worker, skill
@@ -88,7 +88,6 @@ TIERS = {
     "T7": TIER_T7,
 }
 
-# Anti-patterns from the spec
 ANTI_PATTERN_TIER_INFLATION = "tier_inflation"  # Assigning higher tier than warranted
 ANTI_PATTERN_DOMAIN_ONLY = "domain_only_classification"  # Relying solely on domain
 ANTI_PATTERN_NO_TEMPORAL = "no_temporal_bounds"  # Omitting validity window
@@ -122,6 +121,82 @@ TTL_LONG_TERM = "long_term"       # Multi-year validity (policies, standards)
 TTL_MEDIUM_TERM = "medium_term"   # Months to a year (statistics, reports)
 TTL_SHORT_TERM = "short_term"     # Days to weeks (news, events)
 TTL_EPHEMERAL = "ephemeral"       # Hours (weather, live data)
+
+# Claim types (from architectural-recommendations.md §7)
+CLAIM_TYPES = {
+    "empirical_fact": {
+        "description": "Verifiable factual claim",
+        "assessment": "evidence_hierarchy",
+        "ttl_default": TTL_PERMANENT,
+        "example": "Council voted 4-3",
+    },
+    "statistical": {
+        "description": "Quantitative claim with methodology",
+        "assessment": "primary_data_methodology",
+        "ttl_default": TTL_MEDIUM_TERM,
+        "example": "Crime dropped 12%",
+    },
+    "causal": {
+        "description": "Cause-effect relationship claim",
+        "assessment": "grade_factors",
+        "ttl_default": TTL_LONG_TERM,
+        "example": "Rezoning caused traffic increase",
+    },
+    "prediction": {
+        "description": "Forward-looking claim (not assessable for truth)",
+        "assessment": "track_record",
+        "ttl_default": TTL_SHORT_TERM,
+        "example": "Budget will increase next year",
+    },
+    "opinion": {
+        "description": "Value judgment (not assessable; attribute and present)",
+        "assessment": "attribution_only",
+        "ttl_default": TTL_SHORT_TERM,
+        "example": "The policy is good",
+    },
+    "attribution": {
+        "description": "Claim that someone said/did something",
+        "assessment": "source_verification",
+        "ttl_default": TTL_PERMANENT,
+        "example": "Mayor said X at Tuesday meeting",
+    },
+    "temporal": {
+        "description": "Time-bound claim with validity window",
+        "assessment": "freshness_check",
+        "ttl_default": TTL_MEDIUM_TERM,
+        "example": "Population is 50,000",
+    },
+}
+
+# Heuristic patterns for claim-type classification (no LLM needed)
+import re as _re
+
+_STATISTICAL_PATTERNS = [
+    _re.compile(r'\b\d+(\.\d+)?%', _re.IGNORECASE),
+    _re.compile(r'\b(increased|decreased|grew|dropped|rose|fell)\s+by\b', _re.IGNORECASE),
+    _re.compile(r'\b(average|median|mean|total|rate|ratio)\b', _re.IGNORECASE),
+    _re.compile(r'\b(million|billion|trillion)\b', _re.IGNORECASE),
+]
+
+_CAUSAL_PATTERNS = [
+    _re.compile(r'\b(caused|because|due to|result of|led to|resulted in)\b', _re.IGNORECASE),
+    _re.compile(r'\b(therefore|consequently|thus|hence)\b', _re.IGNORECASE),
+]
+
+_PREDICTION_PATTERNS = [
+    _re.compile(r'\b(will|would|expected to|projected|forecast|likely to)\b', _re.IGNORECASE),
+    _re.compile(r'\b(by 20\d\d|next year|in the future)\b', _re.IGNORECASE),
+]
+
+_OPINION_PATTERNS = [
+    _re.compile(r'\b(should|ought|best|worst|good|bad|better|worse)\b', _re.IGNORECASE),
+    _re.compile(r'\b(I think|I believe|in my opinion|arguably)\b', _re.IGNORECASE),
+]
+
+_ATTRIBUTION_PATTERNS = [
+    _re.compile(r'\b(said|stated|announced|declared|claimed|according to)\b', _re.IGNORECASE),
+    _re.compile(r'\b(tweeted|posted|wrote|testified)\b', _re.IGNORECASE),
+]
 
 
 def _check_domain(url: str) -> dict:
@@ -224,6 +299,78 @@ class ClassifierWorker(Worker):
             "rubric_scores": rubric_scores,
         }
 
+    @skill("classify.claim_type", "Classify a claim by type")
+    def classify_claim_type(self, handle):
+        """Classify a claim into one of the defined claim types.
+
+        Uses heuristic pattern matching on the statement text.
+        In production, this would be augmented with LLM classification.
+
+        Params (from handle.params):
+            statement (str): The claim statement.
+
+        Returns:
+            dict with claim_type, assessment_method, ttl_default,
+            confidence, signals.
+        """
+        params = handle.params
+        statement = params.get("statement", "")
+
+        if not statement:
+            return {"error": "statement is required"}
+
+        # Score each type by pattern matches
+        scores = {}
+        signals = {}
+
+        for pattern_list, ctype in [
+            (_STATISTICAL_PATTERNS, "statistical"),
+            (_CAUSAL_PATTERNS, "causal"),
+            (_PREDICTION_PATTERNS, "prediction"),
+            (_OPINION_PATTERNS, "opinion"),
+            (_ATTRIBUTION_PATTERNS, "attribution"),
+        ]:
+            matches = []
+            for p in pattern_list:
+                m = p.search(statement)
+                if m:
+                    matches.append(m.group())
+            scores[ctype] = len(matches)
+            if matches:
+                signals[ctype] = matches
+
+        # Pick highest-scoring type, default to empirical_fact
+        if scores:
+            best = max(scores, key=scores.get)
+            if scores[best] > 0:
+                claim_type = best
+            else:
+                claim_type = "empirical_fact"
+        else:
+            claim_type = "empirical_fact"
+
+        # Check for temporal markers — override if present
+        # A claim like "population is currently 340 million" is temporal
+        # even though it contains statistical patterns
+        temporal_markers = _re.findall(
+            r'\b(currently|as of|now|today|this year|at present)\b',
+            statement, _re.IGNORECASE,
+        )
+        if temporal_markers and claim_type in ("empirical_fact", "statistical"):
+            claim_type = "temporal"
+            signals["temporal"] = temporal_markers
+
+        type_def = CLAIM_TYPES[claim_type]
+
+        return {
+            "claim_type": claim_type,
+            "description": type_def["description"],
+            "assessment_method": type_def["assessment"],
+            "ttl_default": type_def["ttl_default"],
+            "signals": signals,
+            "classified_at": _now_iso(),
+        }
+
     @skill("classify.topic", "Classify claims by topic")
     def classify_topic(self, handle):
         """Classify claims into topic categories and subtopics.
@@ -287,10 +434,32 @@ class ClassifierWorker(Worker):
 
         ttl_category = ttl_map.get(category, TTL_MEDIUM_TERM)
 
+        # Compute actual expiry based on TTL category
+        ttl_durations = {
+            TTL_PERMANENT: None,
+            TTL_LONG_TERM: timedelta(days=730),    # 2 years
+            TTL_MEDIUM_TERM: timedelta(days=180),  # 6 months
+            TTL_SHORT_TERM: timedelta(days=14),    # 2 weeks
+            TTL_EPHEMERAL: timedelta(hours=6),
+        }
+
+        source_date_str = params.get("source_date", "")
+        if source_date_str:
+            try:
+                valid_from = datetime.fromisoformat(source_date_str)
+            except ValueError:
+                valid_from = datetime.now(timezone.utc)
+        else:
+            valid_from = datetime.now(timezone.utc)
+
+        duration = ttl_durations.get(ttl_category)
+        valid_until = (valid_from + duration).isoformat() if duration else None
+
         return {
-            "valid_from": params.get("source_date", _now_iso()),
-            "valid_until": None if ttl_category == TTL_PERMANENT else _now_iso(),
+            "valid_from": valid_from.isoformat(),
+            "valid_until": valid_until,
             "ttl_category": ttl_category,
+            "ttl_days": duration.days if duration else None,
         }
 
 

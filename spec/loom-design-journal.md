@@ -97,3 +97,30 @@ etc.) remains stubbed — it needs content analysis (LLM or
 heuristic) which is iteration 2+ work. Domain lists are
 deliberately conservative: better to default T5 and upgrade
 via rubric than to over-classify.
+
+## 2026-03-06: Momentum i2 — claim types + temporal model
+
+Added claim-type classification (7 types from arch-recs §7):
+empirical_fact, statistical, causal, prediction, opinion,
+attribution, temporal. Uses heuristic regex patterns — no LLM
+needed for initial classification. Temporal markers ("currently",
+"as of", "now") override statistical when present; year
+references ("2025") are date context, not freshness markers.
+
+Enhanced temporal validity: real expiry dates computed from
+TTL durations (permanent/2yr/6mo/2wk/6hr). Added KB
+update_claim skill with version tracking and evidence
+accumulation.
+
+Bug found and fixed: temporal/statistical overlap. "Population
+is currently 340 million" should be temporal (freshness-
+sensitive), not statistical. "Crime dropped 12% in 2025"
+should stay statistical (the year is context, not a freshness
+marker). The distinction matters: temporal claims need refresh
+duties; statistical claims need methodology audits.
+
+Multi-source corroboration test validates the core invariant:
+many T6 sources never exceed one T1 source. This is the
+`quantity_over_quality` anti-pattern guard.
+
+40 Python tests, all green.

@@ -241,6 +241,240 @@ class TestKBStorage(unittest.TestCase):
         self.assertIn("error", result)
 
 
+class TestClaimTypeClassification(unittest.TestCase):
+    """Test heuristic claim-type classification."""
+
+    def setUp(self):
+        self.classifier = ClassifierWorker(worker_id="test-classifier")
+
+    def _classify(self, statement):
+        return self.classifier.classify_claim_type(
+            MockHandle({"statement": statement})
+        )
+
+    def test_statistical_claim(self):
+        r = self._classify("Crime dropped 12% in 2025")
+        self.assertEqual(r["claim_type"], "statistical")
+        self.assertIn("statistical", r["signals"])
+
+    def test_causal_claim(self):
+        r = self._classify("The rezoning caused a traffic increase")
+        self.assertEqual(r["claim_type"], "causal")
+
+    def test_prediction_claim(self):
+        r = self._classify("The budget will increase next year")
+        self.assertEqual(r["claim_type"], "prediction")
+
+    def test_opinion_claim(self):
+        r = self._classify("I believe the policy is the best approach")
+        self.assertEqual(r["claim_type"], "opinion")
+
+    def test_attribution_claim(self):
+        r = self._classify("The mayor said taxes will not increase")
+        # "said" triggers attribution; "will" triggers prediction too
+        # attribution pattern should fire
+        self.assertIn(r["claim_type"], ("attribution", "prediction"))
+
+    def test_temporal_claim(self):
+        r = self._classify("The population is currently 340 million")
+        self.assertEqual(r["claim_type"], "temporal")
+
+    def test_empirical_fact_default(self):
+        r = self._classify("The council voted 4-3 on the motion")
+        self.assertEqual(r["claim_type"], "empirical_fact")
+
+    def test_million_triggers_statistical(self):
+        r = self._classify("The company earned 5 billion in revenue")
+        self.assertEqual(r["claim_type"], "statistical")
+
+
+class TestTemporalValidity(unittest.TestCase):
+    """Test temporal validity computation."""
+
+    def setUp(self):
+        self.classifier = ClassifierWorker(worker_id="test-classifier")
+
+    def test_permanent_has_no_expiry(self):
+        r = self.classifier.classify_temporal_validity(
+            MockHandle({"statement": "Water boils at 100C", "category": "factual"})
+        )
+        self.assertEqual(r["ttl_category"], "permanent")
+        self.assertIsNone(r["valid_until"])
+        self.assertIsNone(r["ttl_days"])
+
+    def test_statistical_expires_in_6_months(self):
+        r = self.classifier.classify_temporal_validity(
+            MockHandle({
+                "statement": "Crime rate is 5%",
+                "category": "statistical",
+                "source_date": "2026-01-01T00:00:00+00:00",
+            })
+        )
+        self.assertEqual(r["ttl_category"], "medium_term")
+        self.assertEqual(r["ttl_days"], 180)
+        self.assertIn("2026-06-30", r["valid_until"])
+
+    def test_opinion_expires_in_2_weeks(self):
+        r = self.classifier.classify_temporal_validity(
+            MockHandle({
+                "statement": "The policy is good",
+                "category": "opinion",
+                "source_date": "2026-03-01T00:00:00+00:00",
+            })
+        )
+        self.assertEqual(r["ttl_category"], "short_term")
+        self.assertEqual(r["ttl_days"], 14)
+        self.assertIn("2026-03-15", r["valid_until"])
+
+
+class TestKBUpdate(unittest.TestCase):
+    """Test KB claim update with version tracking."""
+
+    def setUp(self):
+        self.kb = LoomKBWorker(worker_id="test-kb")
+        self.db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.db_file.name
+        self.db_file.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def _params(self, **kwargs):
+        kwargs["db_path"] = self.db_path
+        return MockHandle(kwargs)
+
+    def test_update_confidence(self):
+        # Store initial claim
+        store = self.kb.kb_store_claim(self._params(
+            statement="Crime rate is 5%",
+            confidence=0.50,
+            status="reported",
+        ))
+        claim_id = store["claim_id"]
+
+        # Update with new evidence
+        update = self.kb.kb_update_claim(self._params(
+            claim_id=claim_id,
+            confidence=0.85,
+            status="corroborated",
+            change_reason="corroborated by second T3 source",
+            evidence=[{
+                "source_url": "https://www.reuters.com/crime-stats",
+                "source_tier": "T3",
+                "excerpt": "FBI data confirms 5% crime rate",
+            }],
+        ))
+        self.assertTrue(update["updated"])
+
+        # Verify update
+        query = self.kb.kb_query_claim(self._params(claim_id=claim_id))
+        self.assertAlmostEqual(query["claim"]["confidence"], 0.85)
+        self.assertEqual(query["claim"]["status"], "corroborated")
+        self.assertEqual(len(query["evidence_chain"]), 1)  # new evidence added
+
+        # Verify version history
+        history = self.kb.kb_claim_history(self._params(claim_id=claim_id))
+        self.assertEqual(len(history["versions"]), 2)  # initial + update
+
+    def test_update_missing_claim_errors(self):
+        result = self.kb.kb_update_claim(self._params(
+            claim_id="nonexistent",
+            change_reason="test",
+        ))
+        self.assertFalse(result["updated"])
+        self.assertIn("error", result)
+
+    def test_update_requires_reason(self):
+        result = self.kb.kb_update_claim(self._params(
+            claim_id="some-id",
+        ))
+        self.assertFalse(result["updated"])
+
+
+class TestMultiSourceCorroboration(unittest.TestCase):
+    """Test corroboration boost from multiple independent sources."""
+
+    def setUp(self):
+        self.corroborator = CorroboratorWorker(worker_id="test-corr")
+        self.kb = LoomKBWorker(worker_id="test-kb")
+        self.db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.db_file.name
+        self.db_file.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def _params(self, **kwargs):
+        kwargs["db_path"] = self.db_path
+        return MockHandle(kwargs)
+
+    def test_corroboration_boost_with_independent_sources(self):
+        """Verify that confidence increases with independent corroboration."""
+        # Single T3 source → reported
+        single = compute_confidence(STATUS_REPORTED, "T3", 1)
+
+        # Two independent T3 sources → corroborated with boost
+        two_sources = compute_confidence(STATUS_CORROBORATED, "T3", 2)
+
+        # Three independent sources → higher
+        three_sources = compute_confidence(STATUS_CORROBORATED, "T3", 3)
+
+        self.assertGreater(two_sources, single,
+                           "Corroboration should increase confidence")
+        self.assertGreater(three_sources, two_sources,
+                           "More sources should increase confidence further")
+
+    def test_t1_plus_t3_stronger_than_t3_plus_t3(self):
+        """Higher best-tier should produce higher confidence."""
+        t1_corroborated = compute_confidence(STATUS_CORROBORATED, "T1", 2)
+        t3_corroborated = compute_confidence(STATUS_CORROBORATED, "T3", 2)
+        self.assertGreater(t1_corroborated, t3_corroborated)
+
+    def test_many_t6_weaker_than_one_t1(self):
+        """Many low-tier sources should NOT exceed a single high-tier source."""
+        many_t6 = compute_confidence(STATUS_CORROBORATED, "T6", 10)
+        one_t1 = compute_confidence(STATUS_REPORTED, "T1", 1)
+        self.assertGreater(one_t1, many_t6,
+                           "10 T6 sources should not beat 1 T1 source")
+
+    def test_full_multi_source_pipeline(self):
+        """End-to-end: store claim, add evidence, update, verify boost."""
+        # Store initial claim from T3 source
+        store = self.kb.kb_store_claim(self._params(
+            statement="City population is 50,000",
+            confidence=compute_confidence(STATUS_REPORTED, "T3"),
+            status="reported",
+            source_tier="T3",
+            evidence=[{
+                "source_url": "https://www.nytimes.com/city-data",
+                "source_tier": "T3",
+            }],
+        ))
+        claim_id = store["claim_id"]
+
+        # Second source corroborates
+        new_confidence = compute_confidence(STATUS_CORROBORATED, "T3", 2)
+        self.kb.kb_update_claim(self._params(
+            claim_id=claim_id,
+            confidence=new_confidence,
+            status="corroborated",
+            change_reason="corroborated by independent T3 source",
+            evidence=[{
+                "source_url": "https://www.reuters.com/city-census",
+                "source_tier": "T3",
+            }],
+        ))
+
+        # Verify final state
+        query = self.kb.kb_query_claim(self._params(claim_id=claim_id))
+        self.assertEqual(query["claim"]["status"], "corroborated")
+        self.assertGreater(
+            query["claim"]["confidence"],
+            compute_confidence(STATUS_REPORTED, "T3"),
+        )
+        self.assertEqual(len(query["evidence_chain"]), 2)
+
+
 class TestGoldenPipeline(unittest.TestCase):
     """End-to-end pipeline test using golden fixture."""
 
