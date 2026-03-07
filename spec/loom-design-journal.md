@@ -245,3 +245,40 @@ What needs work (Phase 2):
 has_next: true — the foundation is solid and Phase 2 work
 (dual-axis, LLM extraction, ClaimReview) is clearly scoped.
 But this is a natural pause point.
+
+## 2026-03-07: Momentum i6 — Phase 2a: dual-axis confidence
+
+Implemented the Admiralty Code dual-axis evaluation system:
+
+**Source reliability (T1-T7) x Information credibility (C1-C6).**
+`compute_confidence_v2()` layers credibility modifiers on top of
+base tier x status confidence. C1 (confirmed) = full weight,
+C5 (improbable) = 0.15 multiplier. C6 (cannot assess) = 0.50
+neutral — no hidden assumption about unrated information.
+
+**GRADE adjustment factors.** Five downgrade factors (risk_of_bias,
+inconsistency, indirectness, imprecision, publication_bias) and
+three upgrade factors (large_effect, dose_response, confounding).
+Each adjustment carries direction + magnitude, applied additively
+to the credibility-adjusted score.
+
+**Analytic confidence derivation.** Final score maps to IPCC-style
+labels: very_high (>=0.90), high (>=0.70), medium (>=0.40),
+low (<0.40). Floor at 0.01 — nothing is zero confidence.
+
+**ClaimReview export.** Schema.org ClaimReview JSON-LD for
+interoperability with fact-checking ecosystem. Maps internal
+status to ClaimReview rating scale (1-5) and alternateName
+(True, Mostly True, Unverified, Disputed, Not Rated).
+
+**Structured disagreement model (IPCC-inspired).** Replaces
+binary "contested" with evidence_strength x agreement_level
+matrix. 9-cell matrix maps to analytic_confidence. Supports
+nature classification (factual, interpretive, temporal,
+definitional, methodological) and position tracking.
+
+**Schema migration 002.** Added dual-axis columns to claims
+and evidence tables, grade_adjustments table, disagreements
+and disagreement_positions tables with indexes.
+
+86 tests (up from 69), all green. Go E2E passes.

@@ -28,9 +28,18 @@ CREATE TABLE IF NOT EXISTS claims (
     confidence REAL DEFAULT 0.0,
     status TEXT DEFAULT 'unverified',
     source_tier TEXT,
+    info_credibility TEXT,
+    evidence_strength TEXT DEFAULT 'limited',
+    agreement_level TEXT DEFAULT 'low',
+    analytic_confidence TEXT,
+    claim_type TEXT,
     valid_from TEXT,
     valid_until TEXT,
     ttl_category TEXT,
+    temporal_status TEXT DEFAULT 'current',
+    superseded_by TEXT,
+    superseded_reason TEXT,
+    deprecation_date TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -40,8 +49,15 @@ CREATE TABLE IF NOT EXISTS evidence (
     claim_id TEXT NOT NULL REFERENCES claims(claim_id),
     source_url TEXT,
     source_tier TEXT,
+    info_credibility TEXT,
+    relationship TEXT DEFAULT 'supports',
     content_hash TEXT,
     excerpt TEXT,
+    warrant TEXT,
+    assumptions TEXT,
+    inference TEXT DEFAULT 'verbatim',
+    directness TEXT DEFAULT 'direct',
+    upstream_source TEXT,
     retrieved_at TEXT,
     created_at TEXT NOT NULL
 );
@@ -85,7 +101,40 @@ CREATE TABLE IF NOT EXISTS contradictions (
     resolved_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS grade_adjustments (
+    adjustment_id TEXT PRIMARY KEY,
+    evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id),
+    factor TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    magnitude REAL NOT NULL,
+    justification TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS disagreements (
+    disagreement_id TEXT PRIMARY KEY,
+    claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+    evidence_strength TEXT NOT NULL,
+    agreement_level TEXT NOT NULL,
+    nature TEXT,
+    axis TEXT,
+    resolution_path TEXT,
+    resolved_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS disagreement_positions (
+    position_id TEXT PRIMARY KEY,
+    disagreement_id TEXT NOT NULL REFERENCES disagreements(disagreement_id),
+    position TEXT NOT NULL,
+    evidence_ids TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_evidence_claim ON evidence(claim_id);
+CREATE INDEX IF NOT EXISTS idx_grade_evidence ON grade_adjustments(evidence_id);
+CREATE INDEX IF NOT EXISTS idx_disagreements_claim ON disagreements(claim_id);
+CREATE INDEX IF NOT EXISTS idx_positions_disagreement ON disagreement_positions(disagreement_id);
 CREATE INDEX IF NOT EXISTS idx_versions_claim ON claim_versions(claim_id);
 CREATE INDEX IF NOT EXISTS idx_relationships_subject ON relationships(subject_id);
 CREATE INDEX IF NOT EXISTS idx_relationships_object ON relationships(object_id);

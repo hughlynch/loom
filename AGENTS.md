@@ -59,7 +59,7 @@ loom/
 | Harvester | `harvest.web`, `harvest.api`, `harvest.document` | web+api real, document stub |
 | Extractor | `extract.claims`, `extract.entities`, `extract.relationships` | claims+entities heuristic, relationships stub |
 | Classifier | `classify.source_tier`, `classify.claim_type`, `classify.topic`, `classify.temporal_validity` | tier+claim_type+temporal real, topic stub |
-| Corroborator | `corroborate.check`, `corroborate.find_contradictions` | both real (deterministic) |
+| Corroborator | `corroborate.check`, `corroborate.find_contradictions`, `corroborate.claim_review`, `corroborate.structured_disagreement` | all real (deterministic) |
 | Adjudicator | `adjudicate.resolve`, `adjudicate.escalate`, `adjudicate.triage_challenge` | all stubs |
 | Curator | `curate.review`, `curate.approve`, `curate.reject` | all stubs |
 | KB | `loom.kb.search`, `loom.kb.query_claim`, `loom.kb.claim_history`, `loom.kb.store_claim`, `loom.kb.update_claim`, `loom.kb.find_similar`, `loom.kb.record_contradiction` | all real (SQLite) |

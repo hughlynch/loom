@@ -115,6 +115,99 @@ def compute_confidence(status: str, source_tier: str,
     return round(base, 4)
 
 
+# Information credibility levels (C1-C6, Admiralty Code axis 2)
+CREDIBILITY_C1 = "C1"  # Confirmed by multiple independent sources
+CREDIBILITY_C2 = "C2"  # Probably true — logical, consistent
+CREDIBILITY_C3 = "C3"  # Possibly true — needs verification
+CREDIBILITY_C4 = "C4"  # Doubtfully true — inconsistent
+CREDIBILITY_C5 = "C5"  # Improbable — contradicts established facts
+CREDIBILITY_C6 = "C6"  # Cannot be assessed
+
+# Credibility modifiers for confidence
+CREDIBILITY_MODIFIERS = {
+    "C1": 1.0,    # Confirmed: full weight
+    "C2": 0.85,   # Probably true
+    "C3": 0.65,   # Possibly true
+    "C4": 0.40,   # Doubtfully true
+    "C5": 0.15,   # Improbable
+    "C6": 0.50,   # Cannot assess: neutral
+}
+
+# GRADE adjustment factors
+GRADE_DOWN_FACTORS = [
+    "risk_of_bias",       # Methodology issues
+    "inconsistency",      # Sources disagree
+    "indirectness",       # Evidence doesn't directly address claim
+    "imprecision",        # Vague/imprecise evidence
+    "publication_bias",   # Incomplete evidence landscape
+]
+GRADE_UP_FACTORS = [
+    "large_effect",       # Overwhelming evidence
+    "dose_response",      # Gradient supports causation
+    "confounding",        # Plausible confounders favor claim
+]
+
+
+def compute_confidence_v2(
+    status: str,
+    source_tier: str,
+    info_credibility: str = "C6",
+    independent_source_count: int = 1,
+    grade_adjustments: list[dict] | None = None,
+) -> dict:
+    """Dual-axis confidence computation with GRADE adjustments.
+
+    Returns dict with base_confidence, credibility_adjusted,
+    grade_adjusted (final), and breakdown of adjustments applied.
+    """
+    # Step 1: Base confidence from tier × status (same as v1)
+    base = compute_confidence(status, source_tier, independent_source_count)
+
+    # Step 2: Credibility modifier (Admiralty axis 2)
+    cred_mod = CREDIBILITY_MODIFIERS.get(info_credibility, 0.50)
+    cred_adjusted = round(base * cred_mod, 4)
+
+    # Step 3: GRADE adjustments
+    adjustments_applied = []
+    grade_delta = 0.0
+    if grade_adjustments:
+        for adj in grade_adjustments:
+            factor = adj.get("factor", "")
+            direction = adj.get("direction", "down")
+            magnitude = adj.get("magnitude", 0.0)
+            if direction == "down":
+                grade_delta -= magnitude
+            elif direction == "up":
+                grade_delta += magnitude
+            adjustments_applied.append({
+                "factor": factor,
+                "direction": direction,
+                "magnitude": magnitude,
+            })
+
+    final = round(max(0.01, min(1.0, cred_adjusted + grade_delta)), 4)
+
+    # Step 4: Derive IPCC-style analytic confidence
+    if final >= 0.90:
+        analytic_confidence = "very_high"
+    elif final >= 0.70:
+        analytic_confidence = "high"
+    elif final >= 0.40:
+        analytic_confidence = "medium"
+    else:
+        analytic_confidence = "low"
+
+    return {
+        "base_confidence": base,
+        "credibility_modifier": cred_mod,
+        "credibility_adjusted": cred_adjusted,
+        "grade_delta": round(grade_delta, 4),
+        "final_confidence": final,
+        "analytic_confidence": analytic_confidence,
+        "adjustments": adjustments_applied,
+    }
+
+
 def _check_independence(source_a: dict, source_b: dict) -> bool:
     """Check if two sources are editorially independent.
 
@@ -189,14 +282,26 @@ class CorroboratorWorker(Worker):
             "circular_references_found": False,
         }
 
+        info_credibility = params.get("info_credibility", "C6")
+        grade_adjustments = params.get("grade_adjustments", None)
+
         confidence = compute_confidence(
             status, source_tier,
             independent_source_count=max(1, independence_check["independent_count"]),
         )
 
+        # Dual-axis confidence (v2) when credibility is provided
+        confidence_v2 = compute_confidence_v2(
+            status, source_tier,
+            info_credibility=info_credibility,
+            independent_source_count=max(1, independence_check["independent_count"]),
+            grade_adjustments=grade_adjustments,
+        )
+
         return {
             "status": status,
             "confidence": confidence,
+            "confidence_v2": confidence_v2,
             "matching_claims": matching_claims,
             "contradicting_claims": contradicting_claims,
             "independence_check": independence_check,
@@ -292,6 +397,136 @@ class CorroboratorWorker(Worker):
             "claims_compared": len(claims),
             "pairs_checked": len(claims) * (len(claims) - 1) // 2,
             "checked_at": _now_iso(),
+        }
+
+
+    @skill("corroborate.claim_review", "Export claim as Schema.org ClaimReview")
+    def claim_review_export(self, handle):
+        """Export a claim assessment as Schema.org ClaimReview JSON-LD.
+
+        Params (from handle.params):
+            claim (dict): Claim with statement, source_url, source_tier.
+            assessment (dict): Output from corroborate.check.
+
+        Returns:
+            dict with claimReview JSON-LD object.
+        """
+        params = handle.params
+        claim = params.get("claim", {})
+        assessment = params.get("assessment", {})
+
+        # Map internal status to ClaimReview alternateName
+        status_to_rating = {
+            STATUS_VERIFIED: "True",
+            STATUS_CORROBORATED: "Mostly True",
+            STATUS_REPORTED: "Unverified",
+            STATUS_CONTESTED: "Disputed",
+            STATUS_UNVERIFIED: "Not Rated",
+        }
+
+        # Map to numeric rating (1-5 scale per ClaimReview spec)
+        status_to_numeric = {
+            STATUS_VERIFIED: 5,
+            STATUS_CORROBORATED: 4,
+            STATUS_REPORTED: 3,
+            STATUS_CONTESTED: 2,
+            STATUS_UNVERIFIED: 1,
+        }
+
+        status = assessment.get("status", STATUS_UNVERIFIED)
+
+        claim_review = {
+            "@context": "https://schema.org",
+            "@type": "ClaimReview",
+            "datePublished": _now_iso(),
+            "claimReviewed": claim.get("statement", ""),
+            "itemReviewed": {
+                "@type": "Claim",
+                "text": claim.get("statement", ""),
+                "appearance": {
+                    "@type": "CreativeWork",
+                    "url": claim.get("source_url", ""),
+                },
+            },
+            "reviewRating": {
+                "@type": "Rating",
+                "ratingValue": status_to_numeric.get(status, 1),
+                "bestRating": 5,
+                "worstRating": 1,
+                "alternateName": status_to_rating.get(status, "Not Rated"),
+            },
+            "author": {
+                "@type": "Organization",
+                "name": "Loom Knowledge System",
+            },
+        }
+
+        # Add confidence metadata as extension
+        confidence_v2 = assessment.get("confidence_v2", {})
+        if confidence_v2:
+            claim_review["reviewRating"]["ratingExplanation"] = (
+                f"Source tier: {claim.get('source_tier', 'unknown')}. "
+                f"Analytic confidence: {confidence_v2.get('analytic_confidence', 'unknown')}. "
+                f"Final score: {confidence_v2.get('final_confidence', 'N/A')}."
+            )
+
+        return {"claim_review": claim_review}
+
+    @skill("corroborate.structured_disagreement", "Record structured disagreement")
+    def structured_disagreement(self, handle):
+        """Record a structured disagreement about a claim (IPCC-inspired).
+
+        Maps evidence_strength x agreement_level to analytic confidence.
+
+        Params (from handle.params):
+            claim_id (str): The claim being disagreed about.
+            evidence_strength (str): limited|medium|robust
+            agreement_level (str): low|medium|high
+            nature (str): factual|interpretive|temporal|definitional|methodological
+            axis (str): What they disagree about.
+            positions (list): List of dicts with position text and evidence_ids.
+
+        Returns:
+            dict with disagreement record and derived analytic confidence.
+        """
+        params = handle.params
+        claim_id = params.get("claim_id", "")
+        evidence_strength = params.get("evidence_strength", "limited")
+        agreement_level = params.get("agreement_level", "low")
+        nature = params.get("nature", "factual")
+        axis = params.get("axis", "")
+        positions = params.get("positions", [])
+
+        if not claim_id:
+            return {"error": "claim_id is required"}
+
+        # IPCC confidence matrix: evidence_strength x agreement_level
+        # -> analytic_confidence
+        confidence_matrix = {
+            ("robust", "high"): "very_high",
+            ("robust", "medium"): "high",
+            ("robust", "low"): "medium",
+            ("medium", "high"): "high",
+            ("medium", "medium"): "medium",
+            ("medium", "low"): "low",
+            ("limited", "high"): "medium",
+            ("limited", "medium"): "low",
+            ("limited", "low"): "low",
+        }
+
+        analytic_confidence = confidence_matrix.get(
+            (evidence_strength, agreement_level), "low"
+        )
+
+        return {
+            "claim_id": claim_id,
+            "evidence_strength": evidence_strength,
+            "agreement_level": agreement_level,
+            "nature": nature,
+            "axis": axis,
+            "positions": positions,
+            "analytic_confidence": analytic_confidence,
+            "created_at": _now_iso(),
         }
 
 

@@ -31,11 +31,13 @@ from workers.classifier.worker import ClassifierWorker
 from workers.corroborator.worker import (
     CorroboratorWorker,
     compute_confidence,
+    compute_confidence_v2,
     STATUS_VERIFIED,
     STATUS_CORROBORATED,
     STATUS_REPORTED,
     STATUS_CONTESTED,
     STATUS_UNVERIFIED,
+    CREDIBILITY_MODIFIERS,
 )
 from workers.kb.worker import LoomKBWorker
 
@@ -101,6 +103,78 @@ class TestConfidenceRules(unittest.TestCase):
                     f"{status}: {tiers[i]} ({scores[i]}) should >= "
                     f"{tiers[i+1]} ({scores[i+1]})"
                 )
+
+
+class TestConfidenceV2(unittest.TestCase):
+    """Test dual-axis confidence computation with GRADE adjustments."""
+
+    def test_credibility_modifier_reduces_confidence(self):
+        """C5 (improbable) should significantly reduce confidence."""
+        r1 = compute_confidence_v2(STATUS_VERIFIED, "T1", info_credibility="C1")
+        r5 = compute_confidence_v2(STATUS_VERIFIED, "T1", info_credibility="C5")
+        self.assertGreater(r1["final_confidence"], r5["final_confidence"])
+        # C1 modifier is 1.0, C5 is 0.15 — big difference
+        self.assertGreater(r1["final_confidence"], 0.90)
+        self.assertLess(r5["final_confidence"], 0.20)
+
+    def test_c6_is_neutral(self):
+        """C6 (cannot assess) uses 0.50 modifier — neutral."""
+        result = compute_confidence_v2(STATUS_REPORTED, "T3", info_credibility="C6")
+        base = result["base_confidence"]
+        self.assertAlmostEqual(
+            result["credibility_adjusted"], base * 0.50, places=3
+        )
+
+    def test_grade_down_reduces(self):
+        """GRADE down-adjustments reduce final confidence."""
+        no_adj = compute_confidence_v2(STATUS_CORROBORATED, "T2", info_credibility="C1")
+        with_adj = compute_confidence_v2(
+            STATUS_CORROBORATED, "T2", info_credibility="C1",
+            grade_adjustments=[
+                {"factor": "risk_of_bias", "direction": "down", "magnitude": 0.10},
+                {"factor": "inconsistency", "direction": "down", "magnitude": 0.05},
+            ],
+        )
+        self.assertGreater(no_adj["final_confidence"], with_adj["final_confidence"])
+        self.assertAlmostEqual(with_adj["grade_delta"], -0.15, places=3)
+
+    def test_grade_up_increases(self):
+        """GRADE up-adjustments increase final confidence."""
+        base_result = compute_confidence_v2(STATUS_REPORTED, "T4", info_credibility="C2")
+        boosted = compute_confidence_v2(
+            STATUS_REPORTED, "T4", info_credibility="C2",
+            grade_adjustments=[
+                {"factor": "large_effect", "direction": "up", "magnitude": 0.10},
+            ],
+        )
+        self.assertGreater(boosted["final_confidence"], base_result["final_confidence"])
+
+    def test_analytic_confidence_levels(self):
+        """Analytic confidence maps to IPCC-style labels."""
+        high = compute_confidence_v2(STATUS_VERIFIED, "T1", info_credibility="C1")
+        self.assertEqual(high["analytic_confidence"], "very_high")
+
+        low = compute_confidence_v2(STATUS_UNVERIFIED, "T7", info_credibility="C5")
+        self.assertEqual(low["analytic_confidence"], "low")
+
+    def test_floor_at_001(self):
+        """Final confidence never drops below 0.01."""
+        result = compute_confidence_v2(
+            STATUS_UNVERIFIED, "T7", info_credibility="C5",
+            grade_adjustments=[
+                {"factor": "risk_of_bias", "direction": "down", "magnitude": 0.50},
+            ],
+        )
+        self.assertGreaterEqual(result["final_confidence"], 0.01)
+
+    def test_returns_all_fields(self):
+        """V2 result dict contains all expected fields."""
+        result = compute_confidence_v2(STATUS_REPORTED, "T3")
+        expected_keys = {
+            "base_confidence", "credibility_modifier", "credibility_adjusted",
+            "grade_delta", "final_confidence", "analytic_confidence", "adjustments",
+        }
+        self.assertEqual(set(result.keys()), expected_keys)
 
 
 class TestClassification(unittest.TestCase):
@@ -1028,6 +1102,134 @@ class TestGoldenPipeline(unittest.TestCase):
         # Different content → different hash
         h3 = _compute_hash(content + " people")
         self.assertNotEqual(h1, h3)
+
+
+class TestClaimReviewExport(unittest.TestCase):
+    """Test Schema.org ClaimReview export."""
+
+    def setUp(self):
+        self.corroborator = CorroboratorWorker(worker_id="test-corroborator")
+
+    def test_verified_claim_review(self):
+        result = self.corroborator.claim_review_export(MockHandle({
+            "claim": {
+                "statement": "US population is 340 million",
+                "source_url": "https://census.gov/data",
+                "source_tier": "T1",
+            },
+            "assessment": {
+                "status": STATUS_VERIFIED,
+                "confidence": 0.975,
+                "confidence_v2": {
+                    "final_confidence": 0.975,
+                    "analytic_confidence": "very_high",
+                },
+            },
+        }))
+        cr = result["claim_review"]
+        self.assertEqual(cr["@type"], "ClaimReview")
+        self.assertEqual(cr["reviewRating"]["alternateName"], "True")
+        self.assertEqual(cr["reviewRating"]["ratingValue"], 5)
+        self.assertEqual(cr["claimReviewed"], "US population is 340 million")
+
+    def test_contested_claim_review(self):
+        result = self.corroborator.claim_review_export(MockHandle({
+            "claim": {"statement": "Disputed claim"},
+            "assessment": {"status": STATUS_CONTESTED},
+        }))
+        cr = result["claim_review"]
+        self.assertEqual(cr["reviewRating"]["alternateName"], "Disputed")
+        self.assertEqual(cr["reviewRating"]["ratingValue"], 2)
+
+    def test_claim_review_has_schema_org_context(self):
+        result = self.corroborator.claim_review_export(MockHandle({
+            "claim": {"statement": "Test"},
+            "assessment": {"status": STATUS_REPORTED},
+        }))
+        self.assertEqual(result["claim_review"]["@context"], "https://schema.org")
+
+
+class TestStructuredDisagreement(unittest.TestCase):
+    """Test IPCC-inspired structured disagreement model."""
+
+    def setUp(self):
+        self.corroborator = CorroboratorWorker(worker_id="test-corroborator")
+
+    def test_robust_high_is_very_high(self):
+        result = self.corroborator.structured_disagreement(MockHandle({
+            "claim_id": "test-1",
+            "evidence_strength": "robust",
+            "agreement_level": "high",
+            "nature": "factual",
+        }))
+        self.assertEqual(result["analytic_confidence"], "very_high")
+
+    def test_limited_low_is_low(self):
+        result = self.corroborator.structured_disagreement(MockHandle({
+            "claim_id": "test-2",
+            "evidence_strength": "limited",
+            "agreement_level": "low",
+            "nature": "interpretive",
+        }))
+        self.assertEqual(result["analytic_confidence"], "low")
+
+    def test_medium_medium_is_medium(self):
+        result = self.corroborator.structured_disagreement(MockHandle({
+            "claim_id": "test-3",
+            "evidence_strength": "medium",
+            "agreement_level": "medium",
+        }))
+        self.assertEqual(result["analytic_confidence"], "medium")
+
+    def test_requires_claim_id(self):
+        result = self.corroborator.structured_disagreement(MockHandle({
+            "evidence_strength": "robust",
+            "agreement_level": "high",
+        }))
+        self.assertIn("error", result)
+
+    def test_positions_passed_through(self):
+        positions = [
+            {"position": "Temperature rose 1.5C", "evidence_ids": ["e1", "e2"]},
+            {"position": "Temperature rose 1.2C", "evidence_ids": ["e3"]},
+        ]
+        result = self.corroborator.structured_disagreement(MockHandle({
+            "claim_id": "test-4",
+            "evidence_strength": "medium",
+            "agreement_level": "low",
+            "nature": "factual",
+            "axis": "magnitude of warming",
+            "positions": positions,
+        }))
+        self.assertEqual(len(result["positions"]), 2)
+        self.assertEqual(result["axis"], "magnitude of warming")
+
+
+class TestCorroborateCheckV2(unittest.TestCase):
+    """Test that corroborate.check returns v2 confidence."""
+
+    def setUp(self):
+        self.corroborator = CorroboratorWorker(worker_id="test-corroborator")
+
+    def test_check_includes_v2(self):
+        result = self.corroborator.corroborate_check(MockHandle({
+            "statement": "The Earth is round",
+            "source_tier": "T1",
+            "info_credibility": "C1",
+        }))
+        self.assertIn("confidence_v2", result)
+        v2 = result["confidence_v2"]
+        self.assertIn("final_confidence", v2)
+        self.assertIn("analytic_confidence", v2)
+        self.assertEqual(v2["credibility_modifier"], 1.0)
+
+    def test_check_v2_default_c6(self):
+        result = self.corroborator.corroborate_check(MockHandle({
+            "statement": "Some claim",
+            "source_tier": "T3",
+        }))
+        v2 = result["confidence_v2"]
+        self.assertEqual(v2["credibility_modifier"], 0.50)
 
 
 if __name__ == "__main__":
