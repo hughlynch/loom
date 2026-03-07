@@ -1087,6 +1087,299 @@ class LoomKBWorker(Worker):
             db.close()
 
 
+    # -- Maintenance skills (backing the refresh + audit rituals) --
+
+    @skill("loom.kb.expiring_claims", "Find claims approaching expiration")
+    def kb_expiring_claims(self, handle):
+        """Find claims whose valid_until date is within the expiry window.
+
+        Params:
+            expiry_window_days (int): How many days ahead to look (default 30).
+            max_tier (int): Only check tiers <= this (default 7 = all).
+
+        Returns:
+            dict with expiring claims and their source URLs.
+        """
+        params = handle.params
+        window = params.get("expiry_window_days", 30)
+        max_tier = params.get("max_tier", 7)
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            now = _now_iso()
+            # SQLite date arithmetic: valid_until <= date('now', '+N days')
+            rows = db.execute(
+                "SELECT c.claim_id, c.statement, c.valid_until, "
+                "c.source_tier, c.status, c.confidence, c.ttl_category "
+                "FROM claims c "
+                "WHERE c.valid_until IS NOT NULL "
+                "AND c.valid_until != '' "
+                "AND c.temporal_status = 'current' "
+                "AND c.valid_until <= datetime('now', '+' || ? || ' days') "
+                "AND CAST(SUBSTR(c.source_tier, 2) AS INTEGER) <= ? "
+                "ORDER BY c.valid_until ASC",
+                (window, max_tier),
+            ).fetchall()
+
+            claims = []
+            for row in rows:
+                # Get sources for each claim
+                sources = db.execute(
+                    "SELECT source_url, content_hash FROM evidence "
+                    "WHERE claim_id = ? AND retracted = 0",
+                    (row["claim_id"],),
+                ).fetchall()
+
+                claims.append({
+                    "claim_id": row["claim_id"],
+                    "statement": row["statement"],
+                    "valid_until": row["valid_until"],
+                    "source_tier": row["source_tier"],
+                    "status": row["status"],
+                    "ttl_category": row["ttl_category"],
+                    "sources": [dict(s) for s in sources],
+                })
+
+            return {
+                "expiring_count": len(claims),
+                "claims": claims,
+                "window_days": window,
+                "checked_at": now,
+            }
+        finally:
+            db.close()
+
+    @skill("loom.kb.find_orphans", "Find claims with no evidence")
+    def kb_find_orphans(self, handle):
+        """Find claims that have no supporting evidence links.
+
+        Returns:
+            dict with orphan claims.
+        """
+        params = handle.params
+        db = _get_db(params.get("db_path", ""))
+        try:
+            rows = db.execute(
+                "SELECT c.claim_id, c.statement, c.status, c.confidence, "
+                "c.source_tier, c.created_at "
+                "FROM claims c "
+                "LEFT JOIN evidence e ON c.claim_id = e.claim_id "
+                "WHERE e.evidence_id IS NULL "
+                "ORDER BY c.created_at DESC"
+            ).fetchall()
+
+            return {
+                "orphan_count": len(rows),
+                "orphans": [dict(r) for r in rows],
+                "checked_at": _now_iso(),
+            }
+        finally:
+            db.close()
+
+    @skill("loom.kb.find_expired", "Find claims past their validity date")
+    def kb_find_expired(self, handle):
+        """Find claims whose valid_until has passed and are still 'current'.
+
+        Returns:
+            dict with expired claims.
+        """
+        params = handle.params
+        db = _get_db(params.get("db_path", ""))
+        try:
+            rows = db.execute(
+                "SELECT claim_id, statement, valid_until, source_tier, "
+                "status, confidence, ttl_category "
+                "FROM claims "
+                "WHERE valid_until IS NOT NULL "
+                "AND valid_until != '' "
+                "AND valid_until <= datetime('now') "
+                "AND temporal_status = 'current' "
+                "ORDER BY valid_until ASC"
+            ).fetchall()
+
+            return {
+                "expired_count": len(rows),
+                "claims": [dict(r) for r in rows],
+                "checked_at": _now_iso(),
+            }
+        finally:
+            db.close()
+
+    @skill("loom.kb.stale_contradictions", "Find unresolved contradictions")
+    def kb_stale_contradictions(self, handle):
+        """Find contradictions unresolved for longer than the configured window.
+
+        Params:
+            stale_days (int): Days after which unresolved = stale (default 30).
+
+        Returns:
+            dict with stale contradictions.
+        """
+        params = handle.params
+        stale_days = params.get("stale_days", 30)
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            rows = db.execute(
+                "SELECT c.contradiction_id, c.claim_a_id, c.claim_b_id, "
+                "c.nature, c.created_at, "
+                "a.statement AS statement_a, b.statement AS statement_b "
+                "FROM contradictions c "
+                "JOIN claims a ON c.claim_a_id = a.claim_id "
+                "JOIN claims b ON c.claim_b_id = b.claim_id "
+                "WHERE c.resolved_at IS NULL "
+                "AND c.created_at <= datetime('now', '-' || ? || ' days') "
+                "ORDER BY c.created_at ASC",
+                (stale_days,),
+            ).fetchall()
+
+            return {
+                "stale_count": len(rows),
+                "contradictions": [dict(r) for r in rows],
+                "stale_threshold_days": stale_days,
+                "checked_at": _now_iso(),
+            }
+        finally:
+            db.close()
+
+    @skill("loom.kb.source_health", "Check source URL availability")
+    def kb_source_health(self, handle):
+        """Check distinct source URLs for availability.
+
+        Does a HEAD request to each unique source URL in the evidence
+        table and reports which are offline (4xx, 5xx, timeout).
+
+        Params:
+            timeout (int): Request timeout in seconds (default 10).
+            limit (int): Max URLs to check (default 100).
+
+        Returns:
+            dict with online, offline, and error counts.
+        """
+        import urllib.request
+        import urllib.error
+
+        params = handle.params
+        timeout = params.get("timeout", 10)
+        limit = params.get("limit", 100)
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            rows = db.execute(
+                "SELECT DISTINCT source_url FROM evidence "
+                "WHERE source_url IS NOT NULL AND source_url != '' "
+                "AND retracted = 0 "
+                "LIMIT ?",
+                (limit,),
+            ).fetchall()
+        finally:
+            db.close()
+
+        online = []
+        offline = []
+        errors = []
+
+        for row in rows:
+            url = row["source_url"]
+            try:
+                req = urllib.request.Request(url, method="HEAD")
+                req.add_header("User-Agent", "Loom-HealthCheck/1.0")
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                if resp.status < 400:
+                    online.append({"url": url, "status": resp.status})
+                else:
+                    offline.append({"url": url, "status": resp.status})
+            except urllib.error.HTTPError as e:
+                offline.append({"url": url, "status": e.code})
+            except Exception as e:
+                errors.append({"url": url, "error": str(e)})
+
+        return {
+            "online_count": len(online),
+            "offline_count": len(offline),
+            "error_count": len(errors),
+            "online": online,
+            "offline": offline,
+            "errors": errors,
+            "checked_at": _now_iso(),
+        }
+
+    @skill("loom.kb.integrity_report", "Compile full integrity audit report")
+    def kb_integrity_report(self, handle):
+        """Run all audit checks and compile a single report.
+
+        Combines: orphans, expired claims, stale contradictions,
+        retracted sources, and label health.
+
+        Params:
+            stale_days (int): Contradiction staleness window (default 30).
+
+        Returns:
+            dict with all audit findings and summary counts.
+        """
+        params = handle.params
+
+        # Run each check
+        orphans = self.kb_find_orphans(handle)
+        expired = self.kb_find_expired(handle)
+        stale = self.kb_stale_contradictions(handle)
+
+        # Count retracted evidence
+        db = _get_db(params.get("db_path", ""))
+        try:
+            retracted_count = db.execute(
+                "SELECT COUNT(*) as cnt FROM evidence WHERE retracted = 1"
+            ).fetchone()["cnt"]
+
+            total_claims = db.execute(
+                "SELECT COUNT(*) as cnt FROM claims"
+            ).fetchone()["cnt"]
+
+            total_evidence = db.execute(
+                "SELECT COUNT(*) as cnt FROM evidence"
+            ).fetchone()["cnt"]
+
+            # Claims with only retracted evidence (zombie claims)
+            zombies = db.execute(
+                "SELECT c.claim_id, c.statement FROM claims c "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM evidence e "
+                "  WHERE e.claim_id = c.claim_id AND e.retracted = 0"
+                ") AND EXISTS ("
+                "  SELECT 1 FROM evidence e2 "
+                "  WHERE e2.claim_id = c.claim_id"
+                ")"
+            ).fetchall()
+        finally:
+            db.close()
+
+        health = "healthy"
+        issues = (orphans["orphan_count"] + expired["expired_count"]
+                  + stale["stale_count"] + len(zombies))
+        if issues > total_claims * 0.2:
+            health = "degraded"
+        elif issues > 0:
+            health = "needs_attention"
+
+        return {
+            "health": health,
+            "summary": {
+                "total_claims": total_claims,
+                "total_evidence": total_evidence,
+                "orphan_claims": orphans["orphan_count"],
+                "expired_claims": expired["expired_count"],
+                "stale_contradictions": stale["stale_count"],
+                "retracted_evidence": retracted_count,
+                "zombie_claims": len(zombies),
+            },
+            "orphans": orphans["orphans"],
+            "expired": expired["claims"],
+            "stale_contradictions": stale["contradictions"],
+            "zombies": [dict(z) for z in zombies],
+            "checked_at": _now_iso(),
+        }
+
+
 worker = LoomKBWorker(worker_id="loom-kb-1")
 
 if __name__ == "__main__":

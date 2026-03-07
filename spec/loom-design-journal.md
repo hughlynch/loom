@@ -376,3 +376,23 @@ system with:
 Total: 103 tests, 10 workers (7 with real skills), 3 schema
 migrations, Go E2E suite. All architectural recommendations
 from the spec have been implemented.
+
+## 2026-03-07: Momentum i10 — maintenance skills
+
+Added 6 maintenance skills to the KB worker backing the
+refresh and audit ritual DAGs:
+
+- `expiring_claims`: find claims within N days of valid_until
+- `find_orphans`: claims with no evidence links (LEFT JOIN)
+- `find_expired`: claims past valid_until still marked current
+- `stale_contradictions`: unresolved contradictions older than N days
+- `source_health`: HEAD request each source URL, report 4xx/5xx
+- `integrity_report`: composite audit (orphans + expired + stale
+  + retracted + zombies) with health classification
+
+Design decision: skills only, not duties. Duties are instance-
+specific (which DB, what schedule, which tiers). The skills are
+universal queries; a grove operator configures duties to call
+them on their preferred cadence.
+
+112 tests, all green.

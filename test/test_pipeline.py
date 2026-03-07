@@ -1582,5 +1582,142 @@ class TestDungSemantics(unittest.TestCase):
         self.assertEqual(sorted(result["grounded_extension"]), ["x", "y", "z"])
 
 
+class TestMaintenanceSkills(unittest.TestCase):
+    """Test KB maintenance/audit skills."""
+
+    def setUp(self):
+        self.kb = LoomKBWorker(worker_id="test-kb")
+        self.db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.db_file.name
+        self.db_file.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def test_find_orphans_empty_db(self):
+        result = self.kb.kb_find_orphans(MockHandle({
+            "db_path": self.db_path,
+        }))
+        self.assertEqual(result["orphan_count"], 0)
+
+    def test_find_orphans_detects_orphan(self):
+        """Claim stored without evidence is an orphan."""
+        result = self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Orphan claim with no evidence",
+            "evidence": [],
+        }))
+        self.assertTrue(result["stored"])
+
+        orphans = self.kb.kb_find_orphans(MockHandle({
+            "db_path": self.db_path,
+        }))
+        self.assertEqual(orphans["orphan_count"], 1)
+        self.assertEqual(orphans["orphans"][0]["statement"],
+                         "Orphan claim with no evidence")
+
+    def test_find_expired_none_when_fresh(self):
+        result = self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Fresh claim",
+            "valid_until": "2099-01-01T00:00:00",
+            "evidence": [{"source_url": "https://example.com"}],
+        }))
+        expired = self.kb.kb_find_expired(MockHandle({
+            "db_path": self.db_path,
+        }))
+        self.assertEqual(expired["expired_count"], 0)
+
+    def test_find_expired_detects_past_due(self):
+        result = self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Old claim",
+            "valid_until": "2020-01-01T00:00:00",
+            "evidence": [{"source_url": "https://example.com"}],
+        }))
+        expired = self.kb.kb_find_expired(MockHandle({
+            "db_path": self.db_path,
+        }))
+        self.assertEqual(expired["expired_count"], 1)
+
+    def test_stale_contradictions_none_initially(self):
+        result = self.kb.kb_stale_contradictions(MockHandle({
+            "db_path": self.db_path,
+            "stale_days": 0,
+        }))
+        self.assertEqual(result["stale_count"], 0)
+
+    def test_integrity_report_healthy(self):
+        self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Healthy claim",
+            "valid_until": "2099-01-01T00:00:00",
+            "evidence": [{"source_url": "https://example.com"}],
+        }))
+        report = self.kb.kb_integrity_report(MockHandle({
+            "db_path": self.db_path,
+        }))
+        self.assertEqual(report["health"], "healthy")
+        self.assertEqual(report["summary"]["total_claims"], 1)
+        self.assertEqual(report["summary"]["orphan_claims"], 0)
+
+    def test_integrity_report_needs_attention(self):
+        # Store an orphan and an expired claim
+        self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Orphan",
+            "evidence": [],
+        }))
+        self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Expired",
+            "valid_until": "2020-01-01T00:00:00",
+            "evidence": [{"source_url": "https://example.com"}],
+        }))
+        self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Good claim",
+            "valid_until": "2099-01-01T00:00:00",
+            "evidence": [{"source_url": "https://good.com"}],
+        }))
+        report = self.kb.kb_integrity_report(MockHandle({
+            "db_path": self.db_path,
+        }))
+        self.assertIn(report["health"], ("needs_attention", "degraded"))
+        self.assertGreater(report["summary"]["orphan_claims"]
+                           + report["summary"]["expired_claims"], 0)
+
+    def test_expiring_claims_within_window(self):
+        # Claim expiring in 10 days
+        from datetime import datetime, timezone, timedelta
+        soon = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
+        self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Expiring soon",
+            "valid_until": soon,
+            "evidence": [{"source_url": "https://example.com"}],
+        }))
+        result = self.kb.kb_expiring_claims(MockHandle({
+            "db_path": self.db_path,
+            "expiry_window_days": 30,
+        }))
+        self.assertEqual(result["expiring_count"], 1)
+
+    def test_expiring_claims_outside_window(self):
+        from datetime import datetime, timezone, timedelta
+        far = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+        self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Far future",
+            "valid_until": far,
+            "evidence": [{"source_url": "https://example.com"}],
+        }))
+        result = self.kb.kb_expiring_claims(MockHandle({
+            "db_path": self.db_path,
+            "expiry_window_days": 30,
+        }))
+        self.assertEqual(result["expiring_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -62,7 +62,7 @@ loom/
 | Corroborator | `corroborate.check`, `corroborate.find_contradictions`, `corroborate.claim_review`, `corroborate.structured_disagreement` | all real (deterministic) |
 | Adjudicator | `adjudicate.resolve`, `adjudicate.escalate`, `adjudicate.triage_challenge`, `adjudicate.ach`, `adjudicate.devils_advocate`, `adjudicate.dung_semantics` | all real (deterministic) |
 | Curator | `curate.review`, `curate.approve`, `curate.reject` | all stubs |
-| KB | `loom.kb.search`, `loom.kb.query_claim`, `loom.kb.claim_history`, `loom.kb.store_claim`, `loom.kb.update_claim`, `loom.kb.find_similar`, `loom.kb.record_contradiction`, `loom.kb.retract_source`, `loom.kb.build_labels`, `loom.kb.sensitivity` | all real (SQLite) |
+| KB | `loom.kb.search`, `loom.kb.query_claim`, `loom.kb.claim_history`, `loom.kb.store_claim`, `loom.kb.update_claim`, `loom.kb.find_similar`, `loom.kb.record_contradiction`, `loom.kb.retract_source`, `loom.kb.build_labels`, `loom.kb.sensitivity`, `loom.kb.expiring_claims`, `loom.kb.find_orphans`, `loom.kb.find_expired`, `loom.kb.stale_contradictions`, `loom.kb.source_health`, `loom.kb.integrity_report` | all real (SQLite) |
 | Snapshot | `loom.snapshot.build`, `loom.snapshot.test`, `loom.snapshot.promote` | all stubs |
 | Tutor | `loom.tutor.assess`, `loom.tutor.teach`, `loom.tutor.verify` | all stubs |
 | Monitor | `loom.monitor.source_rates`, `loom.monitor.challenge_health` | all stubs |
