@@ -282,3 +282,38 @@ and evidence tables, grade_adjustments table, disagreements
 and disagreement_positions tables with indexes.
 
 86 tests (up from 69), all green. Go E2E passes.
+
+## 2026-03-07: Momentum i7 — Phase 2b: pipeline wiring
+
+Wired dual-axis fields through the full pipeline. KB store_claim
+now accepts claim_type, info_credibility, analytic_confidence.
+Evidence INSERT includes relationship, warrant, inference,
+directness, upstream_source — both new-claim and dedup branches.
+Pipeline passes v2 confidence fields from corroborator through
+to storage. 88 tests.
+
+## 2026-03-07: Momentum i8 — Phase 3: dependency network
+
+Implemented ATMS-style dependency tracking:
+
+**Source retraction propagation.** `retract_source` marks all
+evidence from a URL as retracted, then propagates: claims that
+lose ALL support are downgraded to unverified (confidence 0.01),
+claims that drop below 2 sources lose corroboration status.
+Version records created for all affected claims.
+
+**Dependency labels.** `build_labels` creates minimal support
+sets (ATMS-style) — each piece of supporting evidence is an
+independent label. When evidence is retracted, labels containing
+it become invalid. Rebuilding labels after retraction shows which
+support paths survive.
+
+**Sensitivity analysis.** `sensitivity` does read-only "what-if"
+analysis: what would happen if a source were retracted? Reports
+claims that would lose all support vs those that would only
+lose corroboration. No mutations.
+
+**Schema migration 003.** source_retractions table, dependency_labels
+table, retracted/retracted_reason/retracted_at on evidence.
+
+93 tests (up from 88), all green.

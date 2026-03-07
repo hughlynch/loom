@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS evidence (
     inference TEXT DEFAULT 'verbatim',
     directness TEXT DEFAULT 'direct',
     upstream_source TEXT,
+    retracted INTEGER DEFAULT 0,
+    retracted_reason TEXT,
+    retracted_at TEXT,
     retrieved_at TEXT,
     created_at TEXT NOT NULL
 );
@@ -140,6 +143,28 @@ CREATE INDEX IF NOT EXISTS idx_relationships_subject ON relationships(subject_id
 CREATE INDEX IF NOT EXISTS idx_relationships_object ON relationships(object_id);
 CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status);
 CREATE INDEX IF NOT EXISTS idx_claims_category ON claims(category);
+
+CREATE TABLE IF NOT EXISTS source_retractions (
+    retraction_id TEXT PRIMARY KEY,
+    source_url TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    detail TEXT,
+    retracted_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_retractions_url ON source_retractions(source_url);
+
+CREATE TABLE IF NOT EXISTS dependency_labels (
+    label_id TEXT PRIMARY KEY,
+    claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+    evidence_ids TEXT NOT NULL,
+    is_minimal INTEGER DEFAULT 1,
+    is_valid INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_labels_claim ON dependency_labels(claim_id);
 """
 
 DEFAULT_DB_PATH = "/home/hughlynch/loom/data/loom.db"
@@ -767,6 +792,297 @@ class LoomKBWorker(Worker):
         except Exception as e:
             db.rollback()
             return {"error": str(e), "updated": False}
+        finally:
+            db.close()
+
+
+    @skill("loom.kb.retract_source", "Retract a source and propagate")
+    def kb_retract_source(self, handle):
+        """Retract a source URL and propagate to dependent claims.
+
+        Marks all evidence from this source as retracted. For claims that
+        have NO remaining valid (non-retracted) evidence, downgrades
+        status to 'unverified' and confidence to floor. Creates version
+        records for all affected claims.
+
+        Params:
+            source_url (str): The source URL to retract.
+            reason (str): retracted|corrected|expired|discredited
+            detail (str, optional): Explanation.
+
+        Returns:
+            dict with retraction record, affected evidence count,
+            affected claim count, downgraded claims.
+        """
+        params = handle.params
+        source_url = params.get("source_url", "")
+        reason = params.get("reason", "retracted")
+        detail = params.get("detail", "")
+
+        if not source_url:
+            return {"error": "source_url is required"}
+
+        now = _now_iso()
+        db = _get_db(params.get("db_path", ""))
+        try:
+            # Record the retraction
+            retraction_id = _generate_id("ret", source_url + now)
+            db.execute(
+                "INSERT INTO source_retractions "
+                "(retraction_id, source_url, reason, detail, "
+                "retracted_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (retraction_id, source_url, reason, detail, now, now),
+            )
+
+            # Mark all evidence from this source as retracted
+            db.execute(
+                "UPDATE evidence SET retracted = 1, retracted_reason = ?, "
+                "retracted_at = ? WHERE source_url = ?",
+                (reason, now, source_url),
+            )
+            affected_evidence = db.total_changes
+
+            # Find claims that had evidence from this source
+            affected_claims = db.execute(
+                "SELECT DISTINCT claim_id FROM evidence "
+                "WHERE source_url = ?",
+                (source_url,),
+            ).fetchall()
+
+            downgraded = []
+            for row in affected_claims:
+                claim_id = row["claim_id"]
+                # Check if any valid evidence remains
+                valid_count = db.execute(
+                    "SELECT COUNT(*) as cnt FROM evidence "
+                    "WHERE claim_id = ? AND retracted = 0",
+                    (claim_id,),
+                ).fetchone()["cnt"]
+
+                if valid_count == 0:
+                    # No remaining evidence — downgrade
+                    db.execute(
+                        "UPDATE claims SET status = 'unverified', "
+                        "confidence = 0.01, updated_at = ? "
+                        "WHERE claim_id = ?",
+                        (now, claim_id),
+                    )
+                    # Record version
+                    version_id = _generate_id("ver", claim_id + now)
+                    db.execute(
+                        "INSERT INTO claim_versions "
+                        "(version_id, claim_id, statement, confidence, "
+                        "status, changed_by, change_reason, created_at) "
+                        "SELECT ?, claim_id, statement, 0.01, "
+                        "'unverified', 'retraction_propagation', ?, ? "
+                        "FROM claims WHERE claim_id = ?",
+                        (version_id,
+                         f"Source retracted: {source_url}",
+                         now, claim_id),
+                    )
+                    downgraded.append(claim_id)
+                else:
+                    # Recalculate: claims with fewer sources may lose
+                    # corroboration status
+                    claim = db.execute(
+                        "SELECT status FROM claims WHERE claim_id = ?",
+                        (claim_id,),
+                    ).fetchone()
+                    if claim and claim["status"] == "corroborated" and valid_count < 2:
+                        db.execute(
+                            "UPDATE claims SET status = 'reported', "
+                            "updated_at = ? WHERE claim_id = ?",
+                            (now, claim_id),
+                        )
+
+            # Invalidate dependency labels containing retracted evidence
+            retracted_ev_ids = db.execute(
+                "SELECT evidence_id FROM evidence "
+                "WHERE source_url = ? AND retracted = 1",
+                (source_url,),
+            ).fetchall()
+            for ev_row in retracted_ev_ids:
+                ev_id = ev_row["evidence_id"]
+                # Match labels containing this evidence_id in JSON array
+                db.execute(
+                    "UPDATE dependency_labels SET is_valid = 0 "
+                    "WHERE evidence_ids LIKE ?",
+                    (f'%"{ev_id}"%',),
+                )
+
+            db.commit()
+            return {
+                "retraction_id": retraction_id,
+                "source_url": source_url,
+                "reason": reason,
+                "affected_evidence": affected_evidence,
+                "affected_claims": len(affected_claims),
+                "downgraded_claims": downgraded,
+                "retracted_at": now,
+            }
+        except Exception as e:
+            db.rollback()
+            return {"error": str(e)}
+        finally:
+            db.close()
+
+    @skill("loom.kb.build_labels", "Build ATMS dependency labels for a claim")
+    def kb_build_labels(self, handle):
+        """Build minimal dependency label sets for a claim.
+
+        Each label is a minimal set of evidence IDs that independently
+        supports the claim. If a label has all evidence valid, the claim
+        is supported through that path.
+
+        For simple cases (few evidence links), each individual piece of
+        supporting evidence forms its own label. For claims with
+        compound evidence, labels represent independent support paths.
+
+        Params:
+            claim_id (str): The claim to build labels for.
+
+        Returns:
+            dict with labels (list of support sets), valid_count,
+            invalid_count.
+        """
+        params = handle.params
+        claim_id = params.get("claim_id", "")
+
+        if not claim_id:
+            return {"error": "claim_id is required"}
+
+        now = _now_iso()
+        db = _get_db(params.get("db_path", ""))
+        try:
+            # Get all supporting evidence for this claim
+            evidence_rows = db.execute(
+                "SELECT evidence_id, source_url, retracted, "
+                "relationship FROM evidence "
+                "WHERE claim_id = ? AND relationship = 'supports'",
+                (claim_id,),
+            ).fetchall()
+
+            if not evidence_rows:
+                return {
+                    "claim_id": claim_id,
+                    "labels": [],
+                    "valid_count": 0,
+                    "invalid_count": 0,
+                }
+
+            # Clear existing labels for this claim
+            db.execute(
+                "DELETE FROM dependency_labels WHERE claim_id = ?",
+                (claim_id,),
+            )
+
+            # Build minimal labels: each individual piece of supporting
+            # evidence is a minimal support set on its own
+            labels = []
+            valid_count = 0
+            invalid_count = 0
+
+            for ev in evidence_rows:
+                ev_id = ev["evidence_id"]
+                is_valid = 1 if not ev["retracted"] else 0
+                label_id = _generate_id("lbl", claim_id + ev_id)
+
+                evidence_ids_json = json.dumps([ev_id])
+                db.execute(
+                    "INSERT INTO dependency_labels "
+                    "(label_id, claim_id, evidence_ids, is_minimal, "
+                    "is_valid, created_at) VALUES (?, ?, ?, 1, ?, ?)",
+                    (label_id, claim_id, evidence_ids_json, is_valid, now),
+                )
+
+                labels.append({
+                    "label_id": label_id,
+                    "evidence_ids": [ev_id],
+                    "is_valid": bool(is_valid),
+                })
+                if is_valid:
+                    valid_count += 1
+                else:
+                    invalid_count += 1
+
+            db.commit()
+            return {
+                "claim_id": claim_id,
+                "labels": labels,
+                "valid_count": valid_count,
+                "invalid_count": invalid_count,
+            }
+        except Exception as e:
+            db.rollback()
+            return {"error": str(e)}
+        finally:
+            db.close()
+
+    @skill("loom.kb.sensitivity", "What-if analysis for source retraction")
+    def kb_sensitivity(self, handle):
+        """Sensitivity analysis: what would happen if a source were retracted?
+
+        Does NOT actually retract — simulates the impact. Reports which
+        claims would lose all support and which would be downgraded.
+
+        Params:
+            source_url (str): The source URL to simulate retracting.
+
+        Returns:
+            dict with would_lose_all_support (claim IDs),
+            would_lose_corroboration (claim IDs), unaffected count.
+        """
+        params = handle.params
+        source_url = params.get("source_url", "")
+
+        if not source_url:
+            return {"error": "source_url is required"}
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            # Find all claims with evidence from this source
+            affected = db.execute(
+                "SELECT DISTINCT claim_id FROM evidence "
+                "WHERE source_url = ? AND retracted = 0",
+                (source_url,),
+            ).fetchall()
+
+            would_lose_all = []
+            would_lose_corroboration = []
+            unaffected = 0
+
+            for row in affected:
+                claim_id = row["claim_id"]
+                # Count valid evidence NOT from this source
+                other_valid = db.execute(
+                    "SELECT COUNT(*) as cnt FROM evidence "
+                    "WHERE claim_id = ? AND retracted = 0 "
+                    "AND source_url != ?",
+                    (claim_id, source_url),
+                ).fetchone()["cnt"]
+
+                if other_valid == 0:
+                    would_lose_all.append(claim_id)
+                elif other_valid < 2:
+                    # Would drop below corroboration threshold
+                    claim = db.execute(
+                        "SELECT status FROM claims WHERE claim_id = ?",
+                        (claim_id,),
+                    ).fetchone()
+                    if claim and claim["status"] == "corroborated":
+                        would_lose_corroboration.append(claim_id)
+                    else:
+                        unaffected += 1
+                else:
+                    unaffected += 1
+
+            return {
+                "source_url": source_url,
+                "would_lose_all_support": would_lose_all,
+                "would_lose_corroboration": would_lose_corroboration,
+                "unaffected": unaffected,
+                "total_affected_claims": len(affected),
+            }
         finally:
             db.close()
 

@@ -1267,6 +1267,135 @@ class TestDualAxisStorage(unittest.TestCase):
         self.assertEqual(ev["directness"], "direct")
 
 
+class TestSourceRetraction(unittest.TestCase):
+    """Test ATMS-style retraction propagation."""
+
+    def setUp(self):
+        self.kb = LoomKBWorker(worker_id="test-kb")
+        self.db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.db_file.name
+        self.db_file.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def _store(self, statement, sources):
+        """Helper: store claim with given source URLs."""
+        evidence = [
+            {"source_url": url, "source_tier": "T3", "relationship": "supports"}
+            for url in sources
+        ]
+        return self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": statement,
+            "confidence": 0.75,
+            "status": "reported" if len(sources) == 1 else "corroborated",
+            "evidence": evidence,
+        }))
+
+    def test_retract_sole_source_downgrades_claim(self):
+        result = self._store("Claim A", ["https://source1.com/a"])
+        claim_id = result["claim_id"]
+
+        retraction = self.kb.kb_retract_source(MockHandle({
+            "db_path": self.db_path,
+            "source_url": "https://source1.com/a",
+            "reason": "retracted",
+            "detail": "Study was fabricated",
+        }))
+
+        self.assertIn(claim_id, retraction["downgraded_claims"])
+
+        # Verify claim is now unverified
+        query = self.kb.kb_query_claim(MockHandle({
+            "db_path": self.db_path,
+            "claim_id": claim_id,
+        }))
+        self.assertEqual(query["claim"]["status"], "unverified")
+        self.assertAlmostEqual(query["claim"]["confidence"], 0.01)
+
+    def test_retract_one_of_two_sources_keeps_claim(self):
+        result = self._store("Claim B", [
+            "https://source1.com/b",
+            "https://source2.com/b",
+        ])
+        claim_id = result["claim_id"]
+
+        retraction = self.kb.kb_retract_source(MockHandle({
+            "db_path": self.db_path,
+            "source_url": "https://source1.com/b",
+            "reason": "corrected",
+        }))
+
+        self.assertNotIn(claim_id, retraction["downgraded_claims"])
+
+        query = self.kb.kb_query_claim(MockHandle({
+            "db_path": self.db_path,
+            "claim_id": claim_id,
+        }))
+        # Downgraded from corroborated to reported (only 1 source left)
+        self.assertEqual(query["claim"]["status"], "reported")
+
+    def test_sensitivity_analysis(self):
+        r1 = self._store("Only from src1", ["https://src1.com/x"])
+        r2 = self._store("From both", [
+            "https://src1.com/y",
+            "https://src2.com/y",
+        ])
+
+        analysis = self.kb.kb_sensitivity(MockHandle({
+            "db_path": self.db_path,
+            "source_url": "https://src1.com/x",
+        }))
+
+        # src1.com/x is sole source for first claim
+        self.assertIn(r1["claim_id"], analysis["would_lose_all_support"])
+
+    def test_build_labels(self):
+        result = self._store("Labeled claim", [
+            "https://a.com/1",
+            "https://b.com/1",
+        ])
+        claim_id = result["claim_id"]
+
+        labels = self.kb.kb_build_labels(MockHandle({
+            "db_path": self.db_path,
+            "claim_id": claim_id,
+        }))
+
+        self.assertEqual(len(labels["labels"]), 2)
+        self.assertEqual(labels["valid_count"], 2)
+        self.assertEqual(labels["invalid_count"], 0)
+
+    def test_retraction_invalidates_labels(self):
+        result = self._store("Labeled claim 2", [
+            "https://retractme.com/p",
+            "https://keeper.com/p",
+        ])
+        claim_id = result["claim_id"]
+
+        # Build labels first
+        self.kb.kb_build_labels(MockHandle({
+            "db_path": self.db_path,
+            "claim_id": claim_id,
+        }))
+
+        # Retract one source
+        self.kb.kb_retract_source(MockHandle({
+            "db_path": self.db_path,
+            "source_url": "https://retractme.com/p",
+            "reason": "discredited",
+        }))
+
+        # Rebuild labels — should show 1 valid, 1 invalid
+        labels = self.kb.kb_build_labels(MockHandle({
+            "db_path": self.db_path,
+            "claim_id": claim_id,
+        }))
+        self.assertEqual(labels["valid_count"], 1)
+        self.assertEqual(labels["invalid_count"], 1)
+
+
 class TestCorroborateCheckV2(unittest.TestCase):
     """Test that corroborate.check returns v2 confidence."""
 
