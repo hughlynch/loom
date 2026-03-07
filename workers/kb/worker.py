@@ -361,14 +361,22 @@ class LoomKBWorker(Worker):
                     db.execute(
                         "INSERT INTO evidence "
                         "(evidence_id, claim_id, source_url, source_tier, "
-                        "content_hash, excerpt, retrieved_at, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "content_hash, excerpt, info_credibility, relationship, "
+                        "warrant, inference, directness, upstream_source, "
+                        "retrieved_at, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             evidence_id, claim_id,
                             ev.get("source_url", ""),
                             ev.get("source_tier", ""),
                             ev.get("content_hash", ""),
                             ev.get("excerpt", ""),
+                            ev.get("info_credibility"),
+                            ev.get("relationship", "supports"),
+                            ev.get("warrant"),
+                            ev.get("inference", "verbatim"),
+                            ev.get("directness", "direct"),
+                            ev.get("upstream_source"),
                             ev.get("retrieved_at", now), now,
                         ),
                     )
@@ -399,9 +407,10 @@ class LoomKBWorker(Worker):
             db.execute(
                 "INSERT INTO claims "
                 "(claim_id, statement, category, confidence, status, "
-                "source_tier, valid_from, valid_until, ttl_category, "
+                "source_tier, info_credibility, analytic_confidence, "
+                "claim_type, valid_from, valid_until, ttl_category, "
                 "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     claim_id,
                     statement,
@@ -409,6 +418,9 @@ class LoomKBWorker(Worker):
                     params.get("confidence", 0.0),
                     params.get("status", "unverified"),
                     params.get("source_tier", "T5"),
+                    params.get("info_credibility"),
+                    params.get("analytic_confidence"),
+                    params.get("claim_type"),
                     params.get("valid_from", now),
                     params.get("valid_until"),
                     params.get("ttl_category", ""),
@@ -445,8 +457,10 @@ class LoomKBWorker(Worker):
                 db.execute(
                     "INSERT INTO evidence "
                     "(evidence_id, claim_id, source_url, source_tier, "
-                    "content_hash, excerpt, retrieved_at, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "content_hash, excerpt, info_credibility, relationship, "
+                    "warrant, inference, directness, upstream_source, "
+                    "retrieved_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         evidence_id,
                         claim_id,
@@ -454,6 +468,12 @@ class LoomKBWorker(Worker):
                         ev.get("source_tier", ""),
                         ev.get("content_hash", ""),
                         ev.get("excerpt", ""),
+                        ev.get("info_credibility"),
+                        ev.get("relationship", "supports"),
+                        ev.get("warrant"),
+                        ev.get("inference", "verbatim"),
+                        ev.get("directness", "direct"),
+                        ev.get("upstream_source"),
                         ev.get("retrieved_at", now),
                         now,
                     ),

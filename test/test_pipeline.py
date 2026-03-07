@@ -1205,6 +1205,68 @@ class TestStructuredDisagreement(unittest.TestCase):
         self.assertEqual(result["axis"], "magnitude of warming")
 
 
+class TestDualAxisStorage(unittest.TestCase):
+    """Test that dual-axis fields are stored and retrieved from KB."""
+
+    def setUp(self):
+        self.kb = LoomKBWorker(worker_id="test-kb")
+        self.db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.db_file.name
+        self.db_file.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def test_claim_type_stored(self):
+        result = self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Temperature rose 1.5 degrees",
+            "claim_type": "statistical",
+            "info_credibility": "C2",
+            "analytic_confidence": "high",
+            "evidence": [{
+                "source_url": "https://nature.com/article/123",
+                "source_tier": "T4",
+                "relationship": "supports",
+                "inference": "summarized",
+                "directness": "direct",
+            }],
+        }))
+        self.assertTrue(result["stored"])
+
+        query = self.kb.kb_query_claim(MockHandle({
+            "db_path": self.db_path,
+            "claim_id": result["claim_id"],
+        }))
+        self.assertEqual(query["claim"]["claim_type"], "statistical")
+        self.assertEqual(query["claim"]["info_credibility"], "C2")
+        self.assertEqual(query["claim"]["analytic_confidence"], "high")
+
+    def test_evidence_relationship_stored(self):
+        result = self.kb.kb_store_claim(MockHandle({
+            "db_path": self.db_path,
+            "statement": "Sea levels are rising",
+            "evidence": [{
+                "source_url": "https://nasa.gov/data",
+                "source_tier": "T1",
+                "relationship": "supports",
+                "warrant": "Direct measurement from satellite altimetry",
+                "inference": "calculated",
+                "directness": "direct",
+            }],
+        }))
+        self.assertTrue(result["stored"])
+
+        query = self.kb.kb_query_claim(MockHandle({
+            "db_path": self.db_path,
+            "claim_id": result["claim_id"],
+        }))
+        ev = query["evidence_chain"][0]
+        self.assertEqual(ev["relationship"], "supports")
+        self.assertEqual(ev["inference"], "calculated")
+        self.assertEqual(ev["directness"], "direct")
+
+
 class TestCorroborateCheckV2(unittest.TestCase):
     """Test that corroborate.check returns v2 confidence."""
 

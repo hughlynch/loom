@@ -121,6 +121,9 @@ def acquire(url: str, db_path: str = "", max_claims: int = 50) -> dict:
             "source_tier": classification["tier"],
         }))
 
+        # Extract v2 confidence fields
+        v2 = corr.get("confidence_v2", {})
+
         # Store in KB
         store_params = {
             "statement": claim["statement"],
@@ -128,6 +131,9 @@ def acquire(url: str, db_path: str = "", max_claims: int = 50) -> dict:
             "confidence": corr["confidence"],
             "status": corr["status"],
             "source_tier": classification["tier"],
+            "claim_type": claim_type.get("claim_type", "empirical_fact"),
+            "info_credibility": v2.get("credibility_modifier_label", "C6"),
+            "analytic_confidence": v2.get("analytic_confidence", ""),
             "valid_from": temporal.get("valid_from"),
             "valid_until": temporal.get("valid_until"),
             "ttl_category": temporal.get("ttl_category"),
@@ -136,6 +142,9 @@ def acquire(url: str, db_path: str = "", max_claims: int = 50) -> dict:
                 "source_tier": classification["tier"],
                 "content_hash": harvest["content_hash"],
                 "excerpt": claim.get("excerpt", ""),
+                "relationship": "supports",
+                "inference": "verbatim",
+                "directness": "direct",
             }],
         }
         if db_path:
