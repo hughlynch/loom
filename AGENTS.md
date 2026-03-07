@@ -60,7 +60,7 @@ loom/
 | Extractor | `extract.claims`, `extract.entities`, `extract.relationships` | claims+entities heuristic, relationships stub |
 | Classifier | `classify.source_tier`, `classify.claim_type`, `classify.topic`, `classify.temporal_validity` | tier+claim_type+temporal real, topic stub |
 | Corroborator | `corroborate.check`, `corroborate.find_contradictions`, `corroborate.claim_review`, `corroborate.structured_disagreement` | all real (deterministic) |
-| Adjudicator | `adjudicate.resolve`, `adjudicate.escalate`, `adjudicate.triage_challenge` | all stubs |
+| Adjudicator | `adjudicate.resolve`, `adjudicate.escalate`, `adjudicate.triage_challenge`, `adjudicate.ach`, `adjudicate.devils_advocate`, `adjudicate.dung_semantics` | all real (deterministic) |
 | Curator | `curate.review`, `curate.approve`, `curate.reject` | all stubs |
 | KB | `loom.kb.search`, `loom.kb.query_claim`, `loom.kb.claim_history`, `loom.kb.store_claim`, `loom.kb.update_claim`, `loom.kb.find_similar`, `loom.kb.record_contradiction`, `loom.kb.retract_source`, `loom.kb.build_labels`, `loom.kb.sensitivity` | all real (SQLite) |
 | Snapshot | `loom.snapshot.build`, `loom.snapshot.test`, `loom.snapshot.promote` | all stubs |

@@ -40,6 +40,7 @@ from workers.corroborator.worker import (
     CREDIBILITY_MODIFIERS,
 )
 from workers.kb.worker import LoomKBWorker
+from workers.adjudicator.worker import AdjudicatorWorker
 
 
 class MockHandle:
@@ -1421,6 +1422,164 @@ class TestCorroborateCheckV2(unittest.TestCase):
         }))
         v2 = result["confidence_v2"]
         self.assertEqual(v2["credibility_modifier"], 0.50)
+
+
+class TestACHMatrix(unittest.TestCase):
+    """Test Analysis of Competing Hypotheses."""
+
+    def setUp(self):
+        self.adjudicator = AdjudicatorWorker(worker_id="test-adjudicator")
+
+    def test_basic_ach(self):
+        result = self.adjudicator.ach_matrix(MockHandle({
+            "hypotheses": ["Rain caused flooding", "Dam failure caused flooding"],
+            "evidence": [
+                {
+                    "statement": "Heavy rainfall recorded",
+                    "weight": 1.0,
+                    "consistency": {"H1": "consistent", "H2": "neutral"},
+                },
+                {
+                    "statement": "Dam inspection found cracks",
+                    "weight": 0.8,
+                    "consistency": {"H1": "neutral", "H2": "consistent"},
+                },
+                {
+                    "statement": "Flooding started upstream of dam",
+                    "weight": 1.0,
+                    "consistency": {"H1": "consistent", "H2": "inconsistent"},
+                },
+            ],
+        }))
+        self.assertIsNotNone(result["best_hypothesis"])
+        # H1 should win: 2 consistent, 1 neutral vs H2: 1 consistent, 1 neutral, 1 inconsistent
+        self.assertEqual(result["best_hypothesis"]["hypothesis_id"], "H1")
+
+    def test_requires_two_hypotheses(self):
+        result = self.adjudicator.ach_matrix(MockHandle({
+            "hypotheses": ["Only one"],
+            "evidence": [{"statement": "Something"}],
+        }))
+        self.assertIn("error", result)
+
+    def test_rankings_ordered(self):
+        result = self.adjudicator.ach_matrix(MockHandle({
+            "hypotheses": ["A", "B", "C"],
+            "evidence": [
+                {
+                    "statement": "E1",
+                    "consistency": {
+                        "H1": "very_inconsistent",
+                        "H2": "consistent",
+                        "H3": "neutral",
+                    },
+                },
+            ],
+        }))
+        scores = [r["total_score"] for r in result["rankings"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+
+class TestDevilsAdvocate(unittest.TestCase):
+    """Test adversarial review."""
+
+    def setUp(self):
+        self.adjudicator = AdjudicatorWorker(worker_id="test-adjudicator")
+
+    def test_weak_claim_gets_challenges(self):
+        result = self.adjudicator.devils_advocate(MockHandle({
+            "claim": {
+                "statement": "Aliens built the pyramids",
+                "source_tier": "T6",
+                "status": "unverified",
+                "confidence": 0.90,
+                "evidence": [
+                    {"source_url": "https://blog.example.com/aliens"},
+                ],
+            },
+        }))
+        # Should flag: low tier, single source, unverified, overconfidence
+        self.assertGreaterEqual(len(result["challenges"]), 3)
+        self.assertGreater(result["vulnerability_score"], 0.5)
+        self.assertEqual(result["recommendation"], "reject_or_downgrade")
+
+    def test_strong_claim_is_robust(self):
+        result = self.adjudicator.devils_advocate(MockHandle({
+            "claim": {
+                "statement": "US population is 340 million",
+                "source_tier": "T1",
+                "status": "verified",
+                "confidence": 0.97,
+                "evidence": [
+                    {"source_url": "https://census.gov/data"},
+                    {"source_url": "https://bls.gov/stats"},
+                ],
+            },
+        }))
+        self.assertEqual(result["recommendation"], "claim_appears_robust")
+        self.assertLess(result["vulnerability_score"], 0.3)
+
+    def test_circular_corroboration_detected(self):
+        result = self.adjudicator.devils_advocate(MockHandle({
+            "claim": {
+                "statement": "Some claim",
+                "source_tier": "T3",
+                "status": "corroborated",
+                "confidence": 0.80,
+                "evidence": [
+                    {"source_url": "https://example.com/a"},
+                    {"source_url": "https://example.com/b"},
+                ],
+            },
+        }))
+        types = [c["type"] for c in result["challenges"]]
+        self.assertIn("independence", types)
+
+
+class TestDungSemantics(unittest.TestCase):
+    """Test Dung argumentation framework."""
+
+    def setUp(self):
+        self.adjudicator = AdjudicatorWorker(worker_id="test-adjudicator")
+
+    def test_unattacked_in_grounded(self):
+        """Unattacked arguments are always in the grounded extension."""
+        result = self.adjudicator.dung_semantics(MockHandle({
+            "arguments": ["a", "b", "c"],
+            "attacks": [["a", "b"]],
+        }))
+        self.assertIn("a", result["grounded_extension"])
+        self.assertIn("c", result["grounded_extension"])
+        # b is attacked by a (which is unattacked), so b is out
+        self.assertNotIn("b", result["grounded_extension"])
+
+    def test_mutual_attack_empty_grounded(self):
+        """Two arguments attacking each other: grounded is empty."""
+        result = self.adjudicator.dung_semantics(MockHandle({
+            "arguments": ["a", "b"],
+            "attacks": [["a", "b"], ["b", "a"]],
+        }))
+        self.assertEqual(result["grounded_extension"], [])
+        # Preferred should have {a} and {b}
+        self.assertEqual(len(result["preferred_extensions"]), 2)
+
+    def test_reinstatement(self):
+        """a attacks b, b attacks c: a reinstates c."""
+        result = self.adjudicator.dung_semantics(MockHandle({
+            "arguments": ["a", "b", "c"],
+            "attacks": [["a", "b"], ["b", "c"]],
+        }))
+        self.assertIn("a", result["grounded_extension"])
+        self.assertIn("c", result["grounded_extension"])
+        self.assertNotIn("b", result["grounded_extension"])
+
+    def test_no_attacks_all_grounded(self):
+        """With no attacks, all arguments are grounded."""
+        result = self.adjudicator.dung_semantics(MockHandle({
+            "arguments": ["x", "y", "z"],
+            "attacks": [],
+        }))
+        self.assertEqual(sorted(result["grounded_extension"]), ["x", "y", "z"])
 
 
 if __name__ == "__main__":

@@ -222,6 +222,283 @@ class AdjudicatorWorker(Worker):
         }
 
 
+    @skill("adjudicate.ach", "Analysis of Competing Hypotheses matrix")
+    def ach_matrix(self, handle):
+        """Build an ACH (Analysis of Competing Hypotheses) matrix.
+
+        Evaluates each piece of evidence against each hypothesis,
+        scoring consistency. The hypothesis most consistent with all
+        evidence (and least inconsistent) is ranked highest.
+
+        Params:
+            hypotheses (list): List of hypothesis strings.
+            evidence (list): List of evidence dicts with statement and
+                optional weight (0-1, default 1.0).
+
+        Returns:
+            dict with matrix (hypothesis x evidence scores),
+            rankings (hypotheses sorted by score), and the
+            best hypothesis.
+        """
+        params = handle.params
+        hypotheses = params.get("hypotheses", [])
+        evidence = params.get("evidence", [])
+
+        if len(hypotheses) < 2:
+            return {"error": "Need at least 2 hypotheses"}
+        if not evidence:
+            return {"error": "Need at least 1 piece of evidence"}
+
+        # Build consistency matrix
+        # Each cell: "consistent" (C+), "inconsistent" (I-),
+        # "neutral" (N), "very_inconsistent" (II--)
+        matrix = {}
+        scores = {}
+
+        for h_idx, hypothesis in enumerate(hypotheses):
+            h_key = f"H{h_idx + 1}"
+            matrix[h_key] = {"hypothesis": hypothesis, "evidence_scores": []}
+            scores[h_key] = 0.0
+
+            for e_idx, ev in enumerate(evidence):
+                consistency = ev.get("consistency", {}).get(h_key, "neutral")
+                weight = ev.get("weight", 1.0)
+
+                # Score: C+ = +1, N = 0, I- = -1, II-- = -2
+                score_map = {
+                    "consistent": 1.0,
+                    "neutral": 0.0,
+                    "inconsistent": -1.0,
+                    "very_inconsistent": -2.0,
+                }
+                cell_score = score_map.get(consistency, 0.0) * weight
+
+                matrix[h_key]["evidence_scores"].append({
+                    "evidence": ev.get("statement", f"E{e_idx + 1}"),
+                    "consistency": consistency,
+                    "weighted_score": round(cell_score, 4),
+                })
+                scores[h_key] += cell_score
+
+        # Rank hypotheses by score (higher = more consistent)
+        rankings = sorted(
+            [{"hypothesis_id": k, "hypothesis": matrix[k]["hypothesis"],
+              "total_score": round(scores[k], 4)}
+             for k in scores],
+            key=lambda x: x["total_score"],
+            reverse=True,
+        )
+
+        return {
+            "matrix": matrix,
+            "rankings": rankings,
+            "best_hypothesis": rankings[0] if rankings else None,
+            "analyzed_at": _now_iso(),
+        }
+
+    @skill("adjudicate.devils_advocate", "Challenge a claim with counter-arguments")
+    def devils_advocate(self, handle):
+        """Generate structured counter-arguments for a claim.
+
+        Deterministic adversarial review based on claim properties.
+        Identifies weaknesses in evidence chain, potential biases,
+        and alternative explanations.
+
+        Params:
+            claim (dict): The claim with statement, source_tier,
+                status, confidence, evidence (list).
+
+        Returns:
+            dict with challenges (list of structured objections),
+            vulnerability_score (0-1), recommendation.
+        """
+        params = handle.params
+        claim = params.get("claim", {})
+        statement = claim.get("statement", "")
+        source_tier = claim.get("source_tier", "T5")
+        status = claim.get("status", "unverified")
+        confidence = claim.get("confidence", 0.0)
+        evidence = claim.get("evidence", [])
+
+        if not statement:
+            return {"error": "claim.statement is required"}
+
+        challenges = []
+        vulnerability = 0.0
+
+        # Challenge 1: Source authority
+        tier_rank = TIER_RANK.get(source_tier, 5)
+        if tier_rank >= 4:
+            challenges.append({
+                "type": "source_authority",
+                "severity": "high" if tier_rank >= 6 else "medium",
+                "objection": f"Source tier {source_tier} has limited authority. "
+                             f"Has this been verified by higher-tier sources?",
+            })
+            vulnerability += 0.2
+
+        # Challenge 2: Single source
+        if len(evidence) <= 1:
+            challenges.append({
+                "type": "single_source",
+                "severity": "high",
+                "objection": "Claim relies on a single source. "
+                             "Independent corroboration is missing.",
+            })
+            vulnerability += 0.25
+
+        # Challenge 3: No contradiction check
+        if status in ("reported", "unverified"):
+            challenges.append({
+                "type": "unverified",
+                "severity": "medium",
+                "objection": "Claim has not been verified against "
+                             "contradicting evidence in the knowledge base.",
+            })
+            vulnerability += 0.15
+
+        # Challenge 4: High confidence without strong evidence
+        if confidence > 0.80 and tier_rank >= 4:
+            challenges.append({
+                "type": "overconfidence",
+                "severity": "high",
+                "objection": f"Confidence {confidence:.2f} seems high for "
+                             f"a {source_tier} source. Check for anchoring bias.",
+            })
+            vulnerability += 0.2
+
+        # Challenge 5: Evidence independence
+        if len(evidence) >= 2:
+            urls = [e.get("source_url", "") for e in evidence]
+            domains = set()
+            for u in urls:
+                parts = u.split("/")
+                if len(parts) >= 3:
+                    domains.add(parts[2])
+            if len(domains) < len(evidence):
+                challenges.append({
+                    "type": "independence",
+                    "severity": "medium",
+                    "objection": "Multiple evidence items share a domain. "
+                                 "Check for circular corroboration.",
+                })
+                vulnerability += 0.15
+
+        vulnerability = min(1.0, vulnerability)
+
+        if vulnerability >= 0.6:
+            recommendation = "reject_or_downgrade"
+        elif vulnerability >= 0.3:
+            recommendation = "additional_verification_needed"
+        else:
+            recommendation = "claim_appears_robust"
+
+        return {
+            "claim_statement": statement,
+            "challenges": challenges,
+            "vulnerability_score": round(vulnerability, 4),
+            "recommendation": recommendation,
+            "analyzed_at": _now_iso(),
+        }
+
+    @skill("adjudicate.dung_semantics", "Compute grounded/preferred extensions")
+    def dung_semantics(self, handle):
+        """Compute Dung argumentation framework semantics.
+
+        Given a set of arguments and attack relations, computes:
+        - Grounded extension (most skeptical: smallest conflict-free set
+          that defends itself)
+        - Preferred extensions (maximally admissible sets)
+
+        Params:
+            arguments (list): List of argument IDs (strings).
+            attacks (list): List of [attacker, target] pairs.
+
+        Returns:
+            dict with grounded extension and preferred extensions.
+        """
+        params = handle.params
+        arguments = set(params.get("arguments", []))
+        attacks = params.get("attacks", [])
+
+        if not arguments:
+            return {"error": "arguments is required"}
+
+        # Build attack graph
+        attackers_of = {a: set() for a in arguments}
+        targets_of = {a: set() for a in arguments}
+        for attacker, target in attacks:
+            if attacker in arguments and target in arguments:
+                attackers_of[target].add(attacker)
+                targets_of[attacker].add(target)
+
+        # Grounded semantics: iterative fixpoint
+        # Start with unattacked arguments, then add args defended by current set
+        def is_defended(arg, current_set):
+            """An arg is defended if every attacker is attacked by current_set."""
+            for attacker in attackers_of[arg]:
+                if not any(
+                    defender in current_set
+                    for defender in attackers_of[attacker]
+                ):
+                    return False
+            return True
+
+        grounded = set()
+        changed = True
+        while changed:
+            changed = False
+            for arg in arguments:
+                if arg not in grounded and is_defended(arg, grounded):
+                    grounded.add(arg)
+                    changed = True
+
+        # Preferred semantics: maximal admissible sets
+        # An admissible set is conflict-free and defends all its members
+        def is_conflict_free(s):
+            for a in s:
+                for b in s:
+                    if b in targets_of.get(a, set()):
+                        return False
+            return True
+
+        def is_admissible(s):
+            if not is_conflict_free(s):
+                return False
+            for arg in s:
+                if not is_defended(arg, s):
+                    return False
+            return True
+
+        # Find preferred extensions via powerset pruning
+        # For small argument sets (< 15), enumerate subsets
+        arg_list = sorted(arguments)
+        if len(arg_list) > 15:
+            # For large sets, just return grounded as approximation
+            preferred = [sorted(grounded)]
+        else:
+            admissible_sets = []
+            for mask in range(1 << len(arg_list)):
+                subset = {arg_list[i] for i in range(len(arg_list))
+                          if mask & (1 << i)}
+                if is_admissible(subset):
+                    admissible_sets.append(subset)
+
+            # Preferred = maximal admissible (no proper superset is admissible)
+            preferred = []
+            for s in admissible_sets:
+                if not any(s < other for other in admissible_sets):
+                    preferred.append(sorted(s))
+
+        return {
+            "grounded_extension": sorted(grounded),
+            "preferred_extensions": preferred,
+            "arguments_count": len(arguments),
+            "attacks_count": len(attacks),
+            "computed_at": _now_iso(),
+        }
+
+
 worker = AdjudicatorWorker(worker_id="loom-adjudicator-1")
 
 if __name__ == "__main__":

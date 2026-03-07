@@ -1,28 +1,32 @@
 # Loom — Next Plan
 
-## Phase 2: Dual-Axis Schema + LLM Extraction
+## Phases 1-4 Complete
 
-From architectural-recommendations.md Phase 2 (schema change):
+All four architectural recommendation phases have been
+implemented across 9 momentum iterations:
 
-1. **Information credibility axis (C1-C6)** — Add second axis
-   alongside source reliability (T1-T7). Each evidence link
-   gets an independent credibility assessment.
+- Phase 1: Foundation (harvester, extractor, classifier,
+  corroborator, KB, pipeline) — 5 iterations
+- Phase 2: Dual-axis schema (C1-C6, GRADE, ClaimReview,
+  structured disagreement, Toulmin) — 2 iterations
+- Phase 3: Dependency network (ATMS labels, retraction
+  propagation, sensitivity analysis) — 1 iteration
+- Phase 4: Advanced reasoning (ACH, Devil's Advocacy,
+  Dung semantics) — 1 iteration
 
-2. **LLM-backed extraction** — Replace heuristic extractor with
-   LLM calls (LOOM_MODEL) for higher-quality claim extraction.
-   Keep heuristic as fallback when no API key is set.
+103 tests, all green. Go E2E passes.
 
-3. **GRADE-like adjustment factors** — Add up/down modifiers to
-   confidence computation: risk_of_bias, inconsistency,
-   indirectness, imprecision, publication_bias (down);
-   large_effect, dose_response (up).
+## Potential next work
 
-4. **Structured disagreement model** — Replace binary "contested"
-   with evidence_strength × agreement_level matrix (IPCC-inspired).
-
-5. **ClaimReview export** — Schema.org ClaimReview format for
-   interoperability with fact-checking ecosystem.
+- LLM-backed extraction (replace heuristic extractor with
+  LOOM_MODEL for higher-quality claim extraction)
+- Tutor worker implementation (pedagogy spec)
+- Snapshot build/test/promote pipeline
+- Monitor worker (source rates, challenge health)
+- Curator worker (human-in-the-loop review)
+- Full ritual DAG execution via grove orchestrator
 
 ## has_next
-true — Phase 2 is clearly scoped and builds on proven foundation.
-Natural pause point between phases.
+false — all architectural recommendation phases are complete.
+Remaining work is operational (LLM integration, pedagogy,
+monitoring) and would be a new planning cycle.

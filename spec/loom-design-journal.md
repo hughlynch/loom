@@ -317,3 +317,62 @@ lose corroboration. No mutations.
 table, retracted/retracted_reason/retracted_at on evidence.
 
 93 tests (up from 88), all green.
+
+## 2026-03-07: Momentum i9 — Phase 4: advanced reasoning
+
+Implemented the three Phase 4 analytical tools in the adjudicator:
+
+**ACH (Analysis of Competing Hypotheses).** Builds a consistency
+matrix of hypotheses × evidence. Each evidence item rates its
+consistency with each hypothesis (consistent/neutral/inconsistent/
+very_inconsistent). Weighted scores determine the best-supported
+hypothesis. Classic structured analytic technique from intelligence
+analysis.
+
+**Devil's Advocacy.** Deterministic adversarial review that generates
+structured challenges based on claim properties: source authority
+(tier ≥ T4), single source dependency, unverified status, overconfidence
+(high confidence from low-tier source), and circular corroboration
+(same-domain evidence). Produces vulnerability score and recommendation.
+
+**Dung Argumentation Framework.** Computes grounded extension
+(iterative fixpoint: start with unattacked args, add defended args)
+and preferred extensions (maximal admissible sets via powerset for
+≤15 args, grounded approximation for larger sets). Supports
+reinstatement (a→b→c: a reinstates c) and mutual attack (empty
+grounded, two preferred singletons).
+
+All three adjudicator stub skills from Phase 1 were already real;
+now all 6 skills are real deterministic computation. 103 tests.
+
+## 2026-03-07: All four phases complete — reflection
+
+Nine momentum iterations produced a full evidence-based knowledge
+system with:
+
+**Phase 1** (5 iterations):
+- 6 workers: harvester, extractor, classifier, corroborator, KB, pipeline
+- Real HTTP fetching, heuristic extraction, 7-tier classification
+- Deterministic confidence computation, dedup, contradiction detection
+- 2 golden fixtures, live integration tested
+
+**Phase 2** (2 iterations):
+- Dual-axis evaluation (Admiralty Code: T1-T7 × C1-C6)
+- GRADE adjustment factors (5 down, 3 up)
+- ClaimReview Schema.org export
+- IPCC-inspired structured disagreement model
+- Warrant tracking (Toulmin), inference type, directness
+
+**Phase 3** (1 iteration):
+- ATMS-style dependency labels (minimal support sets)
+- Source retraction propagation (cascading downgrades)
+- Sensitivity analysis (what-if without mutation)
+
+**Phase 4** (1 iteration):
+- ACH hypothesis matrices
+- Devil's Advocacy (deterministic adversarial review)
+- Dung argumentation (grounded + preferred semantics)
+
+Total: 103 tests, 10 workers (7 with real skills), 3 schema
+migrations, Go E2E suite. All architectural recommendations
+from the spec have been implemented.
