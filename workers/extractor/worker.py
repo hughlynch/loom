@@ -1,17 +1,21 @@
 """ExtractorWorker — pulls structured claims from raw content.
 
 Responsible for decomposing unstructured text into atomic claims, named
-entities, and relationships. Uses heuristic sentence segmentation and
-pattern matching. LLM integration available when LOOM_MODEL is set.
+entities, and relationships. Hybrid extraction: LLM-backed when
+LOOM_MODEL is set (or ANTHROPIC_API_KEY/GEMINI_API_KEY available),
+heuristic fallback otherwise.
 """
 
 import json
+import logging
 import os
 import re
 import sys
 from datetime import datetime, timezone
 
 from grove.uwp import Worker, skill
+
+log = logging.getLogger(__name__)
 
 # Anti-patterns from the spec
 ANTI_PATTERN_COMPOUND_CLAIM = "compound_claim"  # Bundling multiple assertions
@@ -183,6 +187,203 @@ def _extract_entities(text: str) -> list[dict]:
     return entities
 
 
+# --- LLM-backed extraction ---
+
+_EXTRACTION_SYSTEM = """You are a fact extraction system. Your job is to \
+extract atomic, verifiable claims from text.
+
+For each claim, output a JSON object with:
+- "statement": the claim as a single, self-contained sentence
+- "category": one of: factual, statistical, causal, opinion, \
+definitional, procedural
+- "entities": list of {name, type} where type is person, \
+organization, location, date, or number
+- "confidence_hint": float 0-1, how verifiable this claim is
+
+Output a JSON array of claim objects. Only extract claims that are:
+- Atomic (one assertion per claim)
+- Verifiable (can be checked against evidence)
+- Substantive (not boilerplate, navigation, or metadata)
+
+Do NOT include questions, commands, opinions presented as facts, \
+or unverifiable assertions. Maximum 50 claims.
+
+Output ONLY the JSON array, no other text."""
+
+_EXTRACTION_PROMPT = """Extract all verifiable factual claims \
+from the following text:
+
+---
+{content}
+---
+
+Output a JSON array of claim objects."""
+
+
+def _resolve_model():
+    """Resolve the extraction LLM model.
+
+    Priority:
+      1. LOOM_MODEL env var
+      2. claude-haiku-4-5 (if ANTHROPIC_API_KEY set)
+      3. gemini-2.5-flash (if GEMINI_API_KEY set)
+      4. None (use heuristic fallback)
+    """
+    explicit = os.environ.get("LOOM_MODEL")
+    if explicit:
+        return explicit
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            __import__("anthropic")
+            return "claude-haiku-4-5-20251001"
+        except ImportError:
+            pass
+
+    if os.environ.get("GEMINI_API_KEY"):
+        try:
+            __import__("google.generativeai")
+            return "gemini-2.5-flash"
+        except ImportError:
+            pass
+
+    return None
+
+
+def _call_llm(system, prompt, model_name):
+    """Call an LLM API. Returns (text, error)."""
+    if model_name.startswith("claude-"):
+        return _call_anthropic(system, prompt, model_name)
+    return _call_gemini(system, prompt, model_name)
+
+
+def _call_anthropic(system, prompt, model_name):
+    """Call the Anthropic API."""
+    try:
+        import anthropic
+    except ImportError:
+        return None, "anthropic package not installed"
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None, "ANTHROPIC_API_KEY not set"
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=4096,
+            system=system,
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+        )
+        return response.content[0].text, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _call_gemini(system, prompt, model_name):
+    """Call the Gemini API."""
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return None, "google-generativeai not installed"
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None, "GEMINI_API_KEY not set"
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            model_name,
+            system_instruction=system,
+        )
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.1,
+            ),
+        )
+        return response.text, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _parse_llm_claims(raw_text):
+    """Parse LLM JSON output into claim dicts.
+
+    Handles both clean JSON arrays and JSON wrapped
+    in markdown code fences.
+    """
+    if not raw_text:
+        return []
+
+    text = raw_text.strip()
+
+    # Strip markdown code fences.
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Remove first and last lines (fences).
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        log.warning("Failed to parse LLM output as JSON")
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    claims = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        statement = item.get("statement", "").strip()
+        if not statement or len(statement) < 10:
+            continue
+        claims.append({
+            "statement": statement,
+            "category": item.get("category", "factual"),
+            "excerpt": statement,
+            "entities": item.get("entities", []),
+            "confidence_hint": item.get(
+                "confidence_hint", 0.5),
+            "extraction_method": "llm",
+        })
+    return claims
+
+
+def extract_claims_llm(content, model_name=None,
+                       max_claims=50):
+    """Extract claims using an LLM.
+
+    Returns (claims_list, error_or_none). On error,
+    returns ([], error_string) so caller can fall back
+    to heuristic.
+    """
+    model = model_name or _resolve_model()
+    if model is None:
+        return [], "no LLM model available"
+
+    prompt = _EXTRACTION_PROMPT.format(
+        content=content[:8000])
+
+    text, err = _call_llm(
+        _EXTRACTION_SYSTEM, prompt, model)
+    if err:
+        return [], err
+
+    claims = _parse_llm_claims(text)
+    return claims[:max_claims], None
+
+
 class ExtractorWorker(Worker):
     worker_type = "extractor"
 
@@ -190,49 +391,76 @@ class ExtractorWorker(Worker):
     def extract_claims(self, handle):
         """Extract atomic, verifiable claims from raw content.
 
-        Uses sentence segmentation and heuristic filters to find
-        claim-like sentences. Each claim is tagged with a category
-        and includes the source excerpt for provenance.
+        Hybrid extraction: tries LLM first (when LOOM_MODEL
+        or API keys are available), falls back to heuristic
+        sentence segmentation. Set extraction_method="heuristic"
+        to force heuristic mode.
 
         Params (from handle.params):
             content (str): The raw text content to extract from.
             source_tier (str, optional): Source tier (T1-T7).
-            max_claims (int, optional): Maximum claims to extract (default 50).
+            max_claims (int, optional): Max claims (default 50).
+            extraction_method (str, optional): "auto", "llm",
+                or "heuristic". Default "auto".
 
         Returns:
-            dict with claims list, each containing statement, category,
-            excerpt.
+            dict with claims list, each containing statement,
+            category, excerpt, and extraction_method.
         """
         params = handle.params
         content = params.get("content", "")
         source_tier = params.get("source_tier", "T5")
         max_claims = params.get("max_claims", 50)
+        method = params.get("extraction_method", "auto")
 
         if not content:
             return {"error": "content is required", "claims": []}
 
-        sentences = _segment_sentences(content)
         claims = []
+        used_method = "heuristic"
+        llm_error = None
 
-        for sentence in sentences:
-            if not _is_claim_candidate(sentence):
-                continue
+        # Try LLM extraction first.
+        if method in ("auto", "llm"):
+            llm_claims, llm_error = extract_claims_llm(
+                content,
+                model_name=params.get("model"),
+                max_claims=max_claims,
+            )
+            if llm_claims:
+                claims = llm_claims
+                used_method = "llm"
+            elif method == "llm":
+                # Forced LLM but failed.
+                return {
+                    "error": f"LLM extraction failed: "
+                             f"{llm_error}",
+                    "claims": [],
+                }
 
-            category = _categorize_claim(sentence)
-            claims.append({
-                "statement": sentence,
-                "category": category,
-                "excerpt": sentence,
-            })
-
-            if len(claims) >= max_claims:
-                break
+        # Heuristic fallback.
+        if not claims:
+            sentences = _segment_sentences(content)
+            for sentence in sentences:
+                if not _is_claim_candidate(sentence):
+                    continue
+                category = _categorize_claim(sentence)
+                claims.append({
+                    "statement": sentence,
+                    "category": category,
+                    "excerpt": sentence,
+                    "extraction_method": "heuristic",
+                })
+                if len(claims) >= max_claims:
+                    break
+            used_method = "heuristic"
 
         return {
             "claims": claims,
             "source_tier": source_tier,
-            "total_sentences": len(sentences),
             "claims_extracted": len(claims),
+            "extraction_method": used_method,
+            "llm_error": llm_error,
             "extracted_at": _now_iso(),
         }
 
@@ -272,7 +500,8 @@ class ExtractorWorker(Worker):
     def extract_relationships(self, handle):
         """Extract relationships between entities in the content.
 
-        Stub: relationship extraction requires deeper NLP or LLM.
+        Uses LLM when available, otherwise returns empty list
+        (relationship extraction requires deeper NLP).
 
         Params (from handle.params):
             content (str): The raw text content.
@@ -285,14 +514,52 @@ class ExtractorWorker(Worker):
         content = params.get("content", "")
 
         if not content:
-            return {"error": "content is required", "relationships": []}
+            return {
+                "error": "content is required",
+                "relationships": [],
+            }
 
-        # Stub: relationship extraction is complex and benefits most
-        # from LLM integration. Heuristic approach would need
-        # dependency parsing which is beyond regex.
+        model = _resolve_model()
+        if model is None:
+            return {
+                "relationships": [],
+                "note": "LLM required for relationship "
+                        "extraction",
+                "extracted_at": _now_iso(),
+            }
+
+        rel_system = (
+            "Extract relationships between entities in "
+            "the text. Output a JSON array of objects "
+            "with: subject (str), predicate (str), "
+            "object (str), claim_excerpt (str). "
+            "Only output the JSON array."
+        )
+        prompt = f"Extract relationships from:\n\n{content[:4000]}"
+        text, err = _call_llm(rel_system, prompt, model)
+        if err:
+            return {
+                "relationships": [],
+                "error": err,
+                "extracted_at": _now_iso(),
+            }
+
+        try:
+            raw = text.strip()
+            if raw.startswith("```"):
+                lines = raw.split("\n")[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                raw = "\n".join(lines).strip()
+            rels = json.loads(raw)
+            if not isinstance(rels, list):
+                rels = []
+        except json.JSONDecodeError:
+            rels = []
+
         return {
-            "relationships": [],
-            "note": "relationship extraction requires LLM integration",
+            "relationships": rels,
+            "total_found": len(rels),
             "extracted_at": _now_iso(),
         }
 
