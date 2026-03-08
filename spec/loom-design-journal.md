@@ -737,3 +737,40 @@ system health monitoring.
 20 new tests covering anomaly detection, rate metrics,
 challenge metrics, DB stats, snapshot freshness, and all
 three worker skills. 237 total tests, all green.
+
+## 2026-03-08: Momentum i18 — Snapshot vector index
+
+Embeds all claims into a grove-kit VectorIndex during
+snapshot build, enabling semantic search on promoted
+snapshots alongside existing FTS5 keyword search.
+
+**Build integration**:
+- After FTS5 index population, creates VectorIndex with
+  all filtered claims (statement text + category metadata)
+- Backend selection: FAISSBackend if available, else StubBackend
+- Embedder selection: GeminiEmbedder if API key, else StubEmbedder
+- Saves index to `vectors/` subdirectory in snapshot version dir
+- Manifest records `vector_backend`, `vector_model`, `vector_dimensions`
+
+**Hybrid query**:
+- `query_snapshot()` tries vector search first, falls back to FTS5
+- `search_method` param: `None` (auto), `"vector"`, `"fts5"`
+- Response includes `search_method` field showing which was used
+- Vector results include similarity `score` from cosine distance
+- `min_confidence` filter applied to vector results
+
+**Caching**:
+- Loaded vector indices cached per snapshot directory
+  (`_snapshot_vector_cache`)
+- StubBackend (in-memory) auto-reindexes from snapshot SQLite
+  on first query since it doesn't persist
+
+**Design decisions**:
+- Existing FTS5 query test updated to force `search_method="fts5"`
+  since vector search (with hash-based StubEmbedder) doesn't
+  guarantee keyword-relevant ordering
+- Over-fetch 2x from vector search to allow for confidence filtering
+
+8 new tests covering build integration, manifest recording,
+vector query, forced FTS5, score presence, confidence filtering,
+and search method reporting. 245 total tests, all green.
