@@ -548,3 +548,51 @@ artifact structures. Manifest records `vector_backend` field.
 2. Merge all three sets of changes
 3. Implement Phase 1 (event log) as Loom i12
 4. Implement grove-kit vector abstraction layer
+
+## 2026-03-08: Momentum i12 — event-sourced storage
+
+See prior entry for rationale. Implemented:
+
+- `schema/migrations/004_event_log.sql` — events table with
+  monotonic sequences
+- `_emit_event()` helper in KB worker, called within transactions
+- `_confidence_level()` for boundary-crossing detection
+- Wired into: store_claim, update_claim, record_contradiction,
+  retract_source
+- New skills: `kb.events_since`, `kb.event_count`
+- 14 tests in `test/test_event_log.py`
+
+140 total tests, all green.
+
+## 2026-03-08: Momentum i13 — event-driven snapshot builds
+
+Wired the snapshot builder to the event log so builds are
+triggered by knowledge changes rather than manual invocation.
+
+**Trigger policy** (configurable per domain profile):
+- `should_build()` evaluates events since last build
+- Immediate triggers: `contradiction.resolved`,
+  `claim.confidence_changed` (bypass batch window)
+- Batch mode: wait for `batch_window_seconds` after first event,
+  require `min_changes` events
+- Rate limiting: `min_interval_seconds` between builds
+- Freshness: `max_interval_seconds` forces rebuild even without
+  changes
+
+**Manifest additions**:
+- `event_sequence`: sequence at build time (for diffing)
+- `previous_event_sequence`: from prior build (for replay)
+- `triggered_by`: what caused this build
+- `change_events`: summaries of triggering events
+- `vector_backend`: "none" (future: "faiss" or "libsql")
+
+**New skills**:
+- `loom.snapshot.check_trigger` — evaluate trigger policy
+- `loom.snapshot.build_if_needed` — check + build in one call
+
+Bug fix: `_last_build_time` was called after creating the new
+version directory, finding the empty new dir instead of the
+previous build's manifest. Moved the call before directory
+creation.
+
+146 total tests, all green.
