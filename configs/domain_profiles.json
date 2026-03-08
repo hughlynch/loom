@@ -1,0 +1,34 @@
+{
+  "profiles": {
+    "civic": {
+      "confidence_floor": 0.3,
+      "include_contested": false,
+      "default_ttl_days": 90,
+      "category_ttl": {
+        "governance.budget": 365,
+        "governance.elections": 730,
+        "community.events": 30
+      }
+    },
+    "personal": {
+      "confidence_floor": 0.2,
+      "include_contested": true,
+      "default_ttl_days": 180
+    },
+    "codebase": {
+      "confidence_floor": 0.3,
+      "include_contested": false,
+      "default_ttl_days": 30
+    },
+    "scientific": {
+      "confidence_floor": 0.3,
+      "include_contested": true,
+      "default_ttl_days": 365
+    },
+    "default": {
+      "confidence_floor": 0.3,
+      "include_contested": false,
+      "default_ttl_days": 90
+    }
+  }
+}

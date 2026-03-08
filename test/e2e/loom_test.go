@@ -107,6 +107,7 @@ func TestConfigsValid(t *testing.T) {
 		"source_rubrics.json",
 		"anti_patterns.json",
 		"quarantine.json",
+		"domain_profiles.json",
 	}
 
 	for _, c := range configs {
@@ -196,6 +197,38 @@ print("confidence_computation: all rules verified")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("confidence computation test failed: %v\n%s", err, out)
+	}
+	t.Logf("%s", strings.TrimSpace(string(out)))
+}
+
+// TestSnapshotWorkerRegistration verifies that the snapshot
+// worker registers all 4 skills (build, test, promote, query).
+func TestSnapshotWorkerRegistration(t *testing.T) {
+	script := `
+import sys
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+
+from workers.snapshot.worker import SnapshotWorker
+
+w = SnapshotWorker(worker_id="test")
+skill_names = [v["decl"]["name"] for v in w._skills.values()]
+expected = [
+    "loom.snapshot.build",
+    "loom.snapshot.test",
+    "loom.snapshot.promote",
+    "loom.snapshot.query",
+]
+for e in expected:
+    assert e in skill_names, f"missing skill: {e} (have: {skill_names})"
+print(f"snapshot skills: {len(skill_names)} registered")
+`
+	cmd := exec.Command("python3", "-c", script,
+		pythonPath(), loomDir())
+	cmd.Dir = loomDir()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("snapshot registration failed: %v\n%s", err, out)
 	}
 	t.Logf("%s", strings.TrimSpace(string(out)))
 }
