@@ -624,3 +624,36 @@ semantic vector search via `VectorIndex`.
 
 14 new tests in `test_vector_search.py`.
 160 total tests, all green.
+
+## 2026-03-08: Momentum i15 — LLM-backed extraction
+
+Replaced pure heuristic claim extraction with a hybrid
+LLM + heuristic system. When `LOOM_MODEL` or API keys
+(ANTHROPIC_API_KEY, GEMINI_API_KEY) are available, the
+extractor uses structured LLM output first and falls back
+to heuristic segmentation when no LLM is configured.
+
+**LLM extraction**:
+- `_resolve_model()`: auto-selects best available model
+  (claude-haiku-4.5 > gemini-2.5-flash > None)
+- `extract_claims_llm()`: structured JSON output with
+  system prompt enforcing atomic, verifiable claims
+- `_parse_llm_claims()`: handles markdown code fences,
+  missing fields, non-dict items, short statements
+- `_call_llm()` dispatches to `_call_anthropic()` or
+  `_call_gemini()` based on model name prefix
+
+**Hybrid modes** (via `extraction_method` param):
+- `auto` (default): LLM first, heuristic fallback
+- `llm`: LLM only, errors if unavailable
+- `heuristic`: heuristic only, never calls LLM
+
+**Relationship extraction**: `extract.relationships` now
+uses LLM when available (was always a stub).
+
+**Existing behavior preserved**: without API keys, everything
+works exactly as before (heuristic mode). All existing tests
+pass unchanged.
+
+21 new tests with mock LLM responses.
+181 total tests, all green.
