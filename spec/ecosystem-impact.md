@@ -376,9 +376,12 @@ Loom works independently. No existing expert changes.
 
 **Phase 2 — KB worker integration**
 Experts that have knowledge workers (geeni `gee_knowledge`,
-canopy `knowledge`) gain optional Loom-backed query paths.
-Raw FAISS remains for development/benchmark. Loom snapshots
-for production queries.
+canopy `knowledge`) migrate to grove-kit's `VectorIndex`
+abstraction (see `grove-kit/spec/vector-search-abstraction.md`).
+FAISS backend for development/benchmark. Loom snapshots
+(FAISS or libSQL backend) for production queries. The
+abstraction makes the backend swap a configuration change,
+not a code rewrite.
 
 **Phase 3 — Acquisition pipeline integration**
 Expert-specific ingestion (geeni doc ingestion, canopy bug

@@ -396,3 +396,155 @@ universal queries; a grove operator configures duties to call
 them on their preferred cadence.
 
 112 tests, all green.
+
+## 2026-03-08: Momentum i11 — snapshot build pipeline
+
+The snapshot worker was fully stubbed since inception. The
+`snapshot_build.json` ritual referenced 8 `kb.build.*` skills
+that didn't exist. Consumers (Cubby, Sil) queried the raw
+evidence graph at inference time with LIKE queries.
+
+### What we built
+
+**Snapshot worker** (4 real skills):
+- `loom.snapshot.build`: Full pipeline — resolve claims from
+  evidence graph, recompute confidence deterministically,
+  collapse superseded chains, filter expired/low-confidence,
+  build FTS5 index, package as versioned immutable artifact.
+- `loom.snapshot.test`: 5 quality gates (consistency,
+  completeness, provenance, temporal, confidence floor).
+- `loom.snapshot.promote`: Symlink-based promotion to `current`.
+- `loom.snapshot.query`: FTS5 search against promoted snapshot.
+
+**Domain profiles** (`configs/domain_profiles.json`):
+Parameterize build pipeline per consumer. Civic excludes
+contested claims (floor 0.3), personal includes them (floor
+0.2). Per-category TTL overrides (governance.budget: 365d,
+community.events: 30d).
+
+**CLI wrapper** (`build_cli.py`): For deploy scripts and CI.
+Builds, tests quality gates, optionally promotes.
+
+**Consumer wiring**:
+- Cubby: snapshot-first in `_open_kb()`, FTS5 search via
+  `_search_snapshot()`, falls back to raw Loom then legacy.
+- Sil: vault.context prefers `loom.snapshot.query` RPC,
+  falls back to `loom.kb.search`.
+- Deploy: `stage_cubby()` builds + promotes snapshots from
+  evidence graphs at staging time. Dockerfile COPYs them.
+
+### Design decisions
+
+**FTS5 over FAISS**: Consumers use keyword search today.
+FTS5 is built into SQLite, zero dependencies, and works with
+the existing claims table structure. FAISS can layer on later
+for semantic search without changing the build pipeline.
+
+**Monolithic build over ritual DAG**: The `snapshot_build.json`
+ritual has 8 steps for orchestrated execution. The worker does
+it monolithically for simplicity in non-orchestrated contexts
+(CLI, build scripts). The ritual can wrap `loom.snapshot.build`
+as a single step if preferred.
+
+**Confidence recomputation**: During build, we recompute
+confidence from evidence using the corroborator's deterministic
+`compute_confidence()` rather than trusting stored values. This
+ensures the snapshot reflects current evidence state.
+
+**Symlink promotion**: `current` is a relative symlink to the
+version directory. Atomic pointer swap, easy rollback, no
+database write needed.
+
+### Snapshot schema
+
+```sql
+claims (claim_id, statement, confidence, status, category,
+  source_tier, claim_type, valid_from, valid_until,
+  source_summary, metadata)
+evidence (evidence_id, claim_id, source_url, source_tier,
+  excerpt, relationship)
+claims_fts USING fts5(statement, category, source_summary,
+  content=claims, content_rowid=rowid)
+snapshot_meta (key, value)
+```
+
+### Tests
+
+12 new unit tests: build artifact structure, FTS5 index,
+expired filtering, confidence floor, superseded collapse,
+changelog diff, quality gates pass/fail, promote symlink,
+FTS5 query, domain profile application, CLI wrapper.
+
+Go E2E: snapshot worker registration test (4 skills),
+domain_profiles.json config validation.
+
+## 2026-03-08: Storage strategy reconciliation
+
+Two parallel research efforts converged:
+
+1. **Storage research** (branch `claude/research-dolt-integration-rHJHB`
+   in this repo): 513-line analysis of Dolt, libSQL, event-sourced
+   SQLite, and SQLite+Git for evidence graph versioning.
+
+2. **Ecosystem specs** (branch `claude/knowledge-acquisition-system-RJu7y`
+   in abwp): ~4800 lines of specs for knowledge acquisition, CI/CD,
+   pedagogy, adversarial resilience, and per-product deployment.
+
+These were developed independently (on phone, no multi-repo visibility)
+and needed reconciliation before merging.
+
+### Key decisions
+
+**Ruled out Dolt.** Best version control primitives, but operational
+weight (200MB Go binary, MySQL server process) violates the deployment
+spec's "no new services" constraint. Loom's adjudicator handles
+contradiction resolution better than Dolt's cell-level merge. No
+vector search support. Federation use case is distant.
+
+**Phase 1: Event-sourced SQLite.** Formalize the event log that
+knowledge-ci.md already requires. ~200-300 lines. `claim_versions`
+remains (human audit trail); events table is the machine-readable
+counterpart. Enables event-driven build triggers, diff queries,
+replay for testing.
+
+**Phase 2: libSQL migration.** Gated on external conditions (libSQL
+maturity, Cubby/Yohumps vector search need). Collapses snapshot
+to single file. Eliminates FAISS dependency.
+
+**grove-kit vector search abstraction.** The highest-leverage cross-
+cutting decision. Six independent FAISS indices across the ecosystem.
+FAISS was already swapped out once (google3/third_party migration).
+Thin interface (`embed`, `add`, `query`) in grove-kit with pluggable
+backends (FAISS now, libSQL later). Spec at
+`grove-kit/spec/vector-search-abstraction.md`.
+
+**Made snapshot format backend-agnostic.** knowledge-ci.md previously
+hardcoded `chunks.faiss`. Revised to show both FAISS and libSQL
+artifact structures. Manifest records `vector_backend` field.
+
+### New specs
+
+- `loom/spec/storage-strategy.md` — storage backend decisions,
+  event log schema, phase plan
+- `grove-kit/spec/vector-search-abstraction.md` — pluggable
+  vector search interface, backend implementations, migration path
+
+### Revised specs
+
+- `loom/spec/knowledge-ci.md` — snapshot format backend-agnostic,
+  vector backend references updated
+- `loom/spec/ecosystem-impact.md` — Phase 2 references grove-kit
+  abstraction
+
+### Cross-repo branches
+
+- `loom/storage-strategy` (this branch)
+- `grove-kit/loom/vector-search-abstraction`
+- abwp `claude/knowledge-acquisition-system-RJu7y` (needs revision)
+
+### What's next
+
+1. Revise abwp branch specs for backend-agnostic snapshot format
+2. Merge all three sets of changes
+3. Implement Phase 1 (event log) as Loom i12
+4. Implement grove-kit vector abstraction layer

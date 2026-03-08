@@ -195,7 +195,7 @@ their own rebuilds. The dependency graph is a DAG — no cycles.
 | **Collapser** | `kb.build.collapse` | Merges superseded claim chains into current claims, preserving history links |
 | **Filter** | `kb.build.filter` | Removes expired claims, applies domain-specific inclusion rules |
 | **Chunker** | `kb.build.chunk` | Generates retrieval-optimized text segments from resolved claims with confidence metadata |
-| **Indexer** | `kb.build.index` | Builds vector embeddings (FAISS) and full-text search indexes (FTS5) from chunks |
+| **Indexer** | `kb.build.index` | Builds vector embeddings and full-text search indexes (FTS5) from chunks. Vector backend is pluggable via grove-kit `VectorIndex` — see `grove-kit/spec/vector-search-abstraction.md` |
 | **Tester** | `kb.build.test` | Runs golden fixtures against the built snapshot to verify correctness |
 | **Packager** | `kb.build.package` | Assembles the snapshot artifact with version, manifest, and integrity hashes |
 
@@ -304,17 +304,35 @@ the evidence graph.
 
 ### 3.1 Artifact structure
 
+The snapshot format depends on the vector search backend.
+See `spec/storage-strategy.md` for the full rationale and
+`grove-kit/spec/vector-search-abstraction.md` for the
+pluggable backend interface.
+
+**With FAISS backend (current default):**
 ```
 snapshots/{domain_id}/v{version}/
   manifest.json        # version, build metadata, dependency versions
-  claims.sqlite        # resolved claims with confidence levels
-  chunks.sqlite        # retrieval-optimized text segments
-  chunks.faiss         # vector index for semantic search
-  chunks_fts.sqlite    # FTS5 index for keyword search
+  snapshot.sqlite      # resolved claims, chunks, FTS5 index
+  vectors.faiss        # vector index for semantic search
+  id_map.json          # FAISS index → chunk_id mapping
   changelog.json       # diff from previous version
   test_report.json     # golden fixture results
   integrity.sha256     # hash of all files in the artifact
 ```
+
+**With libSQL backend (future, single-file):**
+```
+snapshots/{domain_id}/v{version}/
+  manifest.json        # version, build metadata, dependency versions
+  snapshot.db          # claims, chunks, vectors, FTS — all in one
+  changelog.json       # diff from previous version
+  test_report.json     # golden fixture results
+  integrity.sha256     # hash of all files in the artifact
+```
+
+The manifest records the backend so query routing can load
+the correct `VectorBackend` implementation.
 
 ### 3.2 Manifest schema
 
@@ -344,8 +362,9 @@ snapshots/{domain_id}/v{version}/
       "unverified": 803
     },
     "total_chunks": 18432,
-    "embedding_model": "text-embedding-3-small",
-    "embedding_dimensions": 1536
+    "vector_backend": "faiss",
+    "embedding_model": "gemini-embedding-001",
+    "embedding_dimensions": 768
   },
   "test_results": {
     "fixtures_run": 200,
@@ -372,7 +391,7 @@ CREATE TABLE chunks (
     valid_from      TEXT,
     valid_until     TEXT,
     source_summary  TEXT,             -- human-readable source attribution
-    embedding       BLOB,             -- vector embedding (also in FAISS)
+    embedding       BLOB,             -- vector embedding (backend-dependent)
     metadata        TEXT              -- JSON: additional context
 );
 ```
@@ -646,7 +665,7 @@ Query Router
     ▼
 Snapshot v48 (or canary v49)
     │
-    ├── vector search (FAISS) + FTS5
+    ├── vector search (via grove-kit VectorIndex) + FTS5
     ├── returns chunks with baked-in confidence
     │
     ▼
@@ -940,8 +959,9 @@ and rituals.
 ## 11. Open Questions
 
 **How large can a snapshot get?** A well-populated civic KB
-might have 50,000 claims and 100,000 chunks. FAISS handles
-this easily. But a scientific frontier KB for all of biology
+might have 50,000 claims and 100,000 chunks. Current backends
+(FAISS, libSQL) handle this easily. But a scientific frontier
+KB for all of biology
 could have millions of claims. At some point, snapshots need
 to be sharded by subdomain. The domain profile system
 supports this, but the sharding strategy is unspecified.
