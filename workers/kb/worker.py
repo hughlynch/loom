@@ -165,6 +165,26 @@ CREATE TABLE IF NOT EXISTS dependency_labels (
 );
 
 CREATE INDEX IF NOT EXISTS idx_labels_claim ON dependency_labels(claim_id);
+
+CREATE TABLE IF NOT EXISTS events (
+    event_id TEXT PRIMARY KEY,
+    sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    aggregate_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    domain_id TEXT NOT NULL DEFAULT 'default',
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'system'
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_seq ON events(sequence);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_aggregate
+    ON events(aggregate_id);
+CREATE INDEX IF NOT EXISTS idx_events_domain ON events(domain_id);
+CREATE INDEX IF NOT EXISTS idx_events_domain_seq
+    ON events(domain_id, sequence);
 """
 
 DEFAULT_DB_PATH = "/home/hughlynch/loom/data/loom.db"
@@ -188,6 +208,56 @@ def _get_db(db_path: str = "") -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
     return conn
+
+
+def _confidence_level(score):
+    """Map numeric confidence to a named level."""
+    if score >= 0.85:
+        return "verified"
+    elif score >= 0.65:
+        return "corroborated"
+    elif score >= 0.40:
+        return "reported"
+    elif score >= 0.15:
+        return "contested"
+    return "unverified"
+
+
+def _next_sequence(db):
+    """Get next monotonic sequence number for events."""
+    row = db.execute(
+        "SELECT MAX(sequence) as mx FROM events"
+    ).fetchone()
+    current = row["mx"] if row and row["mx"] is not None else 0
+    return current + 1
+
+
+def _emit_event(db, event_type, aggregate_id,
+                aggregate_type, payload, domain_id="default",
+                created_by="system"):
+    """Emit an event to the event log.
+
+    Must be called within an existing transaction (before
+    commit). The event is committed with the state change
+    atomically.
+    """
+    now = _now_iso()
+    seq = _next_sequence(db)
+    event_id = _generate_id(
+        "evt", f"{event_type}:{aggregate_id}:{seq}"
+    )
+    db.execute(
+        "INSERT INTO events "
+        "(event_id, sequence, event_type, aggregate_id, "
+        "aggregate_type, payload, domain_id, created_at, "
+        "created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            event_id, seq, event_type, aggregate_id,
+            aggregate_type, json.dumps(payload),
+            domain_id, now, created_by,
+        ),
+    )
+    return event_id
 
 
 class LoomKBWorker(Worker):
@@ -420,6 +490,14 @@ class LoomKBWorker(Worker):
                             (new_conf, now, claim_id),
                         )
 
+                # Emit events for dedup path
+                _emit_event(
+                    db, "evidence.added", claim_id,
+                    "claim", {
+                        "reason": "deduplicated_evidence",
+                        "evidence_count": len(evidence_list),
+                    },
+                )
                 db.commit()
                 return {
                     "claim_id": claim_id,
@@ -502,6 +580,37 @@ class LoomKBWorker(Worker):
                         ev.get("retrieved_at", now),
                         now,
                     ),
+                )
+
+            # Emit claim.integrated event
+            _emit_event(
+                db, "claim.integrated", claim_id,
+                "claim", {
+                    "after": {
+                        "statement": statement,
+                        "confidence": params.get(
+                            "confidence", 0.0),
+                        "status": params.get(
+                            "status", "unverified"),
+                        "category": params.get("category", ""),
+                        "source_tier": params.get(
+                            "source_tier", "T5"),
+                    },
+                    "evidence_count": len(evidence_list),
+                    "triggered_by": "kb.store_claim",
+                },
+            )
+            # Emit evidence.added for each link
+            for ev in evidence_list:
+                _emit_event(
+                    db, "evidence.added", claim_id,
+                    "evidence", {
+                        "source_url": ev.get("source_url", ""),
+                        "source_tier": ev.get(
+                            "source_tier", ""),
+                        "relationship": ev.get(
+                            "relationship", "supports"),
+                    },
                 )
 
             db.commit()
@@ -671,6 +780,27 @@ class LoomKBWorker(Worker):
                         ),
                     )
 
+            # Emit contradiction event
+            _emit_event(
+                db, "contradiction.created",
+                contradiction_id, "contradiction", {
+                    "claim_a_id": claim_a_id,
+                    "claim_b_id": claim_b_id,
+                    "nature": nature,
+                    "triggered_by": "kb.record_contradiction",
+                },
+            )
+            # Emit confidence change events for both claims
+            for cid in (claim_a_id, claim_b_id):
+                _emit_event(
+                    db, "claim.confidence_changed", cid,
+                    "claim", {
+                        "before": {"status": "reported"},
+                        "after": {"status": "contested"},
+                        "reason": f"contradiction {contradiction_id}",
+                    },
+                )
+
             db.commit()
             return {
                 "contradiction_id": contradiction_id,
@@ -781,6 +911,59 @@ class LoomKBWorker(Worker):
                         ev.get("retrieved_at", now),
                         now,
                     ),
+                )
+
+            # Emit claim.updated event
+            before = {
+                "confidence": row["confidence"],
+                "status": row["status"],
+            }
+            after = {
+                "confidence": (new_confidence
+                               if new_confidence is not None
+                               else row["confidence"]),
+                "status": (new_status
+                           if new_status is not None
+                           else row["status"]),
+            }
+            _emit_event(
+                db, "claim.updated", claim_id,
+                "claim", {
+                    "before": before,
+                    "after": after,
+                    "reason": change_reason,
+                    "triggered_by": "kb.update_claim",
+                },
+            )
+            # Check for confidence level boundary crossing
+            old_level = _confidence_level(row["confidence"])
+            new_level = _confidence_level(
+                after["confidence"])
+            if old_level != new_level:
+                _emit_event(
+                    db, "claim.confidence_changed",
+                    claim_id, "claim", {
+                        "before": {
+                            "level": old_level,
+                            "score": row["confidence"],
+                        },
+                        "after": {
+                            "level": new_level,
+                            "score": after["confidence"],
+                        },
+                        "reason": change_reason,
+                    },
+                )
+            # Emit evidence.added for new evidence
+            for ev in evidence_list:
+                _emit_event(
+                    db, "evidence.added", claim_id,
+                    "evidence", {
+                        "source_url": ev.get(
+                            "source_url", ""),
+                        "source_tier": ev.get(
+                            "source_tier", ""),
+                    },
                 )
 
             db.commit()
@@ -909,6 +1092,60 @@ class LoomKBWorker(Worker):
                     "WHERE evidence_ids LIKE ?",
                     (f'%"{ev_id}"%',),
                 )
+
+            # Emit source.retracted event
+            _emit_event(
+                db, "source.retracted", source_url,
+                "source", {
+                    "reason": reason,
+                    "detail": detail,
+                    "affected_evidence": affected_evidence,
+                    "affected_claims": len(affected_claims),
+                    "triggered_by": "kb.retract_source",
+                },
+            )
+            # Emit evidence.retracted for each affected
+            for ev_row in retracted_ev_ids:
+                _emit_event(
+                    db, "evidence.retracted",
+                    ev_row["evidence_id"], "evidence", {
+                        "source_url": source_url,
+                        "reason": reason,
+                    },
+                )
+            # Emit claim events for downgraded claims
+            for cid in downgraded:
+                _emit_event(
+                    db, "claim.confidence_changed", cid,
+                    "claim", {
+                        "before": {"status": "reported"},
+                        "after": {
+                            "status": "unverified",
+                            "confidence": 0.01,
+                        },
+                        "reason": (
+                            f"source retracted: {source_url}"
+                        ),
+                    },
+                )
+            # Emit label.invalidated events
+            for ev_row in retracted_ev_ids:
+                ev_id = ev_row["evidence_id"]
+                inv_labels = db.execute(
+                    "SELECT label_id FROM dependency_labels "
+                    "WHERE evidence_ids LIKE ? "
+                    "AND is_valid = 0",
+                    (f'%"{ev_id}"%',),
+                ).fetchall()
+                for lb in inv_labels:
+                    _emit_event(
+                        db, "label.invalidated",
+                        lb["label_id"],
+                        "dependency_label", {
+                            "retracted_evidence": ev_id,
+                            "source_url": source_url,
+                        },
+                    )
 
             db.commit()
             return {
@@ -1378,6 +1615,111 @@ class LoomKBWorker(Worker):
             "zombies": [dict(z) for z in zombies],
             "checked_at": _now_iso(),
         }
+
+
+    @skill("loom.kb.events_since",
+           "Query events since a sequence position")
+    def kb_events_since(self, handle):
+        """Return events after a given sequence position.
+
+        Used by the snapshot builder to determine what
+        changed since the last build, and for diffing
+        between snapshot versions.
+
+        Params:
+            since_sequence (int): Return events after this
+                sequence number. 0 returns all events.
+            domain_id (str, optional): Filter by domain
+                (default: all domains).
+            event_type (str, optional): Filter by event type.
+            limit (int, optional): Max events (default 1000).
+
+        Returns:
+            dict with events list and latest_sequence.
+        """
+        params = handle.params
+        since = params.get("since_sequence", 0)
+        domain_id = params.get("domain_id", "")
+        event_type = params.get("event_type", "")
+        limit = params.get("limit", 1000)
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            sql = "SELECT * FROM events WHERE sequence > ?"
+            args = [since]
+            if domain_id:
+                sql += " AND domain_id = ?"
+                args.append(domain_id)
+            if event_type:
+                sql += " AND event_type = ?"
+                args.append(event_type)
+            sql += " ORDER BY sequence ASC LIMIT ?"
+            args.append(limit)
+
+            rows = db.execute(sql, args).fetchall()
+            events = []
+            latest_seq = since
+            for r in rows:
+                evt = dict(r)
+                # Parse payload JSON for consumers
+                try:
+                    evt["payload"] = json.loads(
+                        evt["payload"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                events.append(evt)
+                latest_seq = max(latest_seq, r["sequence"])
+
+            return {
+                "events": events,
+                "count": len(events),
+                "since_sequence": since,
+                "latest_sequence": latest_seq,
+            }
+        finally:
+            db.close()
+
+    @skill("loom.kb.event_count",
+           "Count events in the log")
+    def kb_event_count(self, handle):
+        """Return total event count and latest sequence.
+
+        Params:
+            domain_id (str, optional): Filter by domain.
+
+        Returns:
+            dict with total_events, latest_sequence.
+        """
+        params = handle.params
+        domain_id = params.get("domain_id", "")
+
+        db = _get_db(params.get("db_path", ""))
+        try:
+            if domain_id:
+                total = db.execute(
+                    "SELECT COUNT(*) as cnt FROM events "
+                    "WHERE domain_id = ?",
+                    (domain_id,),
+                ).fetchone()["cnt"]
+                latest = db.execute(
+                    "SELECT MAX(sequence) as mx FROM events "
+                    "WHERE domain_id = ?",
+                    (domain_id,),
+                ).fetchone()["mx"]
+            else:
+                total = db.execute(
+                    "SELECT COUNT(*) as cnt FROM events"
+                ).fetchone()["cnt"]
+                latest = db.execute(
+                    "SELECT MAX(sequence) as mx FROM events"
+                ).fetchone()["mx"]
+
+            return {
+                "total_events": total,
+                "latest_sequence": latest or 0,
+            }
+        finally:
+            db.close()
 
 
 worker = LoomKBWorker(worker_id="loom-kb-1")
