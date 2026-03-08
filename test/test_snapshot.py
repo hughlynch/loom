@@ -19,6 +19,9 @@ from workers.snapshot.worker import (
     query_snapshot,
     should_build,
     _get_profile,
+    _VECTOR_AVAILABLE,
+    _build_vector_index,
+    _snapshot_vector_cache,
 )
 from workers.kb.worker import LoomKBWorker
 
@@ -494,6 +497,7 @@ class TestSnapshotPromote(unittest.TestCase):
 class TestSnapshotQuery(unittest.TestCase):
 
     def setUp(self):
+        _snapshot_vector_cache.clear()
         self.snap_dir = tempfile.mkdtemp()
         claims = [
             {
@@ -539,12 +543,14 @@ class TestSnapshotQuery(unittest.TestCase):
         os.symlink("v1", current)
 
     def tearDown(self):
+        _snapshot_vector_cache.clear()
         shutil.rmtree(self.snap_dir, ignore_errors=True)
 
     def test_query_fts5(self):
         qr = query_snapshot(
             "test_domain", "budget",
             snapshots_dir=self.snap_dir,
+            search_method="fts5",
         )
         self.assertNotIn("error", qr)
         self.assertGreater(len(qr["results"]), 0)
@@ -552,6 +558,7 @@ class TestSnapshotQuery(unittest.TestCase):
             "budget",
             qr["results"][0]["statement"].lower(),
         )
+        self.assertEqual(qr["search_method"], "fts5")
 
     def test_query_no_promoted(self):
         qr = query_snapshot(
@@ -910,6 +917,257 @@ class TestEventDrivenBuilds(unittest.TestCase):
         finally:
             os.unlink(db_path)
             shutil.rmtree(snap_dir)
+
+
+class TestSnapshotVectorIndex(unittest.TestCase):
+    """Test vector index integration in snapshot build."""
+
+    def setUp(self):
+        self.snap_dir = tempfile.mkdtemp()
+        _snapshot_vector_cache.clear()
+        self.claims = [
+            {
+                "claim_id": "c1",
+                "statement": "City council approved budget of $5M",
+                "category": "governance.budget",
+                "confidence": 0.85,
+                "status": "corroborated",
+                "source_tier": "T2",
+            },
+            {
+                "claim_id": "c2",
+                "statement": "New park opening on Oak Street",
+                "category": "community.events",
+                "confidence": 0.7,
+                "status": "reported",
+                "source_tier": "T3",
+            },
+            {
+                "claim_id": "c3",
+                "statement": "Traffic accidents increased 20%",
+                "category": "safety",
+                "confidence": 0.5,
+                "status": "reported",
+                "source_tier": "T4",
+            },
+        ]
+        self.evidence = [
+            {
+                "evidence_id": "e1",
+                "claim_id": "c1",
+                "source_url": "https://city.gov/budget",
+                "source_tier": "T2",
+            },
+            {
+                "evidence_id": "e2",
+                "claim_id": "c2",
+                "source_url": "https://city.gov/parks",
+                "source_tier": "T3",
+            },
+            {
+                "evidence_id": "e3",
+                "claim_id": "c3",
+                "source_url": "https://data.gov/traffic",
+                "source_tier": "T4",
+            },
+        ]
+        self.db_path = _make_test_db(
+            self.claims, self.evidence)
+
+    def tearDown(self):
+        _snapshot_vector_cache.clear()
+        os.unlink(self.db_path)
+        shutil.rmtree(self.snap_dir, ignore_errors=True)
+
+    @unittest.skipUnless(
+        _VECTOR_AVAILABLE, "vector search not available")
+    def test_build_creates_vector_index(self):
+        """Build should create vector index alongside FTS5."""
+        result = build_snapshot(
+            "vec_test", self.db_path,
+            profile_name="personal",
+            snapshots_dir=self.snap_dir,
+        )
+        self.assertNotIn("error", result)
+        manifest = result["manifest"]
+        self.assertNotEqual(
+            manifest["vector_backend"], "none")
+        self.assertIsNotNone(manifest["vector_model"])
+        self.assertIsNotNone(manifest["vector_dimensions"])
+
+    @unittest.skipUnless(
+        _VECTOR_AVAILABLE, "vector search not available")
+    def test_manifest_records_vector_info(self):
+        """Manifest should record vector backend details."""
+        result = build_snapshot(
+            "vec_test", self.db_path,
+            profile_name="personal",
+            snapshots_dir=self.snap_dir,
+        )
+        snap_path = result["snapshot_path"]
+        with open(os.path.join(
+            snap_path, "manifest.json"
+        )) as f:
+            manifest = json.load(f)
+        self.assertIn("vector_backend", manifest)
+        self.assertIn("vector_model", manifest)
+        self.assertIn("vector_dimensions", manifest)
+        self.assertNotEqual(
+            manifest["vector_backend"], "none")
+
+    @unittest.skipUnless(
+        _VECTOR_AVAILABLE, "vector search not available")
+    def test_query_uses_vector_search(self):
+        """Query should use vector search when available."""
+        result = build_snapshot(
+            "vec_test", self.db_path,
+            profile_name="personal",
+            snapshots_dir=self.snap_dir,
+        )
+        snap_path = result["snapshot_path"]
+
+        # Promote the snapshot.
+        domain_dir = os.path.join(
+            self.snap_dir, "vec_test")
+        current = os.path.join(domain_dir, "current")
+        os.symlink("v1", current)
+
+        qr = query_snapshot(
+            "vec_test", "budget",
+            snapshots_dir=self.snap_dir,
+        )
+        self.assertIn("search_method", qr)
+        self.assertEqual(qr["search_method"], "vector")
+        self.assertGreater(qr["count"], 0)
+
+    @unittest.skipUnless(
+        _VECTOR_AVAILABLE, "vector search not available")
+    def test_query_forced_fts5(self):
+        """Forcing FTS5 should bypass vector search."""
+        result = build_snapshot(
+            "vec_test", self.db_path,
+            profile_name="personal",
+            snapshots_dir=self.snap_dir,
+        )
+
+        # Promote.
+        domain_dir = os.path.join(
+            self.snap_dir, "vec_test")
+        current = os.path.join(domain_dir, "current")
+        os.symlink("v1", current)
+
+        qr = query_snapshot(
+            "vec_test", "budget",
+            snapshots_dir=self.snap_dir,
+            search_method="fts5",
+        )
+        self.assertEqual(qr["search_method"], "fts5")
+        self.assertGreater(qr["count"], 0)
+
+    @unittest.skipUnless(
+        _VECTOR_AVAILABLE, "vector search not available")
+    def test_vector_results_have_scores(self):
+        """Vector search results should include similarity scores."""
+        result = build_snapshot(
+            "vec_test", self.db_path,
+            profile_name="personal",
+            snapshots_dir=self.snap_dir,
+        )
+
+        # Promote.
+        domain_dir = os.path.join(
+            self.snap_dir, "vec_test")
+        current = os.path.join(domain_dir, "current")
+        os.symlink("v1", current)
+
+        qr = query_snapshot(
+            "vec_test", "council budget approval",
+            snapshots_dir=self.snap_dir,
+        )
+        self.assertEqual(qr["search_method"], "vector")
+        for r in qr["results"]:
+            self.assertIn("score", r)
+            self.assertIsInstance(r["score"], float)
+
+    @unittest.skipUnless(
+        _VECTOR_AVAILABLE, "vector search not available")
+    def test_min_confidence_filter_with_vector(self):
+        """Vector search should respect min_confidence."""
+        result = build_snapshot(
+            "vec_test", self.db_path,
+            profile_name="personal",
+            snapshots_dir=self.snap_dir,
+        )
+
+        # Promote.
+        domain_dir = os.path.join(
+            self.snap_dir, "vec_test")
+        current = os.path.join(domain_dir, "current")
+        os.symlink("v1", current)
+
+        qr = query_snapshot(
+            "vec_test", "budget",
+            min_confidence=0.9,
+            snapshots_dir=self.snap_dir,
+        )
+        # All results should be above threshold.
+        for r in qr["results"]:
+            self.assertGreaterEqual(r["confidence"], 0.9)
+
+    def test_fts5_still_works_without_vector(self):
+        """FTS5 fallback should still work."""
+        result = build_snapshot(
+            "vec_test", self.db_path,
+            profile_name="personal",
+            snapshots_dir=self.snap_dir,
+        )
+
+        # Promote.
+        domain_dir = os.path.join(
+            self.snap_dir, "vec_test")
+        current = os.path.join(domain_dir, "current")
+        os.symlink("v1", current)
+
+        qr = query_snapshot(
+            "vec_test", "budget",
+            snapshots_dir=self.snap_dir,
+            search_method="fts5",
+        )
+        self.assertEqual(qr["search_method"], "fts5")
+        self.assertGreater(qr["count"], 0)
+        # Should find budget claim.
+        statements = [r["statement"] for r in qr["results"]]
+        self.assertTrue(any(
+            "budget" in s.lower() for s in statements))
+
+    @unittest.skipUnless(
+        _VECTOR_AVAILABLE, "vector search not available")
+    def test_query_returns_search_method(self):
+        """All query results should include search_method."""
+        build_snapshot(
+            "vec_test", self.db_path,
+            profile_name="personal",
+            snapshots_dir=self.snap_dir,
+        )
+        domain_dir = os.path.join(
+            self.snap_dir, "vec_test")
+        current = os.path.join(domain_dir, "current")
+        os.symlink("v1", current)
+
+        # Auto (should use vector).
+        qr = query_snapshot(
+            "vec_test", "park",
+            snapshots_dir=self.snap_dir,
+        )
+        self.assertIn("search_method", qr)
+
+        # Forced FTS5.
+        qr2 = query_snapshot(
+            "vec_test", "park",
+            snapshots_dir=self.snap_dir,
+            search_method="fts5",
+        )
+        self.assertEqual(qr2["search_method"], "fts5")
 
 
 if __name__ == "__main__":

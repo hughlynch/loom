@@ -1,8 +1,9 @@
 """SnapshotWorker — builds, tests, promotes, and queries knowledge snapshots.
 
 Compiles the evidence graph into immutable, versioned, FTS5-indexed
-snapshots. Runs quality gates, promotes snapshots to production, and
-serves FTS5 queries against promoted snapshots.
+snapshots with optional vector embeddings for semantic search. Runs
+quality gates, promotes snapshots to production, and serves hybrid
+FTS5+vector queries against promoted snapshots.
 """
 
 import hashlib
@@ -20,6 +21,30 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), ".."),
 )
 from corroborator.worker import compute_confidence
+
+# Import grove-kit vector search abstraction.
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__),
+                    "..", "..", "..", "grove-kit", "kb"))
+try:
+    from vector import (
+        VectorIndex, StubBackend, StubEmbedder,
+    )
+    _VECTOR_AVAILABLE = True
+except ImportError:
+    _VECTOR_AVAILABLE = False
+
+try:
+    from faiss_backend import FAISSBackend
+    _FAISS_AVAILABLE = True
+except ImportError:
+    _FAISS_AVAILABLE = False
+
+try:
+    from gemini_embedder import GeminiEmbedder
+    _GEMINI_AVAILABLE = True
+except ImportError:
+    _GEMINI_AVAILABLE = False
 
 # Event types that trigger immediate builds (bypass batch).
 IMMEDIATE_TRIGGERS = {
@@ -91,6 +116,124 @@ def _row_get(row, key, default=None):
         return val if val is not None else default
     except (IndexError, KeyError):
         return default
+
+
+def _build_vector_index(version_dir, claims):
+    """Build a vector index for snapshot claims and save it.
+
+    Returns (backend_name, model_name, dimensions) or None
+    if vector search is unavailable.
+    """
+    if not _VECTOR_AVAILABLE or not claims:
+        return None
+
+    # Select backend — FAISS if available, else Stub.
+    vectors_dir = os.path.join(version_dir, "vectors")
+    if _FAISS_AVAILABLE:
+        backend = FAISSBackend(vectors_dir)
+        backend_name = "faiss"
+    else:
+        backend = StubBackend()
+        backend_name = "stub"
+
+    # Select embedder — Gemini if API key, else Stub.
+    if (_GEMINI_AVAILABLE
+            and os.environ.get("GEMINI_API_KEY")):
+        embedder = GeminiEmbedder()
+    else:
+        embedder = StubEmbedder(dim=64)
+
+    idx = VectorIndex(backend, embedder)
+
+    # Batch-embed all claims.
+    items = [
+        (c["claim_id"], c["statement"],
+         {"claim_id": c["claim_id"],
+          "category": c.get("category", "")})
+        for c in claims
+    ]
+    idx.add_texts(items)
+    idx.save()
+
+    return backend_name, embedder.model_name, embedder.dimensions
+
+
+def _load_snapshot_vector_index(snapshot_dir):
+    """Load a saved vector index from a snapshot directory.
+
+    Returns VectorIndex or None.
+    """
+    if not _VECTOR_AVAILABLE:
+        return None
+
+    # Check manifest for vector backend info.
+    manifest_path = os.path.join(snapshot_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        return None
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    vb = manifest.get("vector_backend", "none")
+    if vb == "none":
+        return None
+
+    vectors_dir = os.path.join(snapshot_dir, "vectors")
+
+    # Select backend.
+    if vb == "faiss" and _FAISS_AVAILABLE:
+        backend = FAISSBackend(vectors_dir)
+    elif vb == "stub":
+        backend = StubBackend()
+    else:
+        return None
+
+    # Select embedder (must match what was used at build).
+    dim = manifest.get("vector_dimensions", 64)
+    if (_GEMINI_AVAILABLE
+            and os.environ.get("GEMINI_API_KEY")):
+        embedder = GeminiEmbedder()
+    else:
+        embedder = StubEmbedder(dim=dim)
+
+    idx = VectorIndex(backend, embedder)
+
+    # For stub backend, we need to reindex from the snapshot DB
+    # since StubBackend is in-memory and doesn't persist.
+    if vb == "stub" and idx.count() == 0:
+        snap_db = os.path.join(snapshot_dir, "snapshot.sqlite")
+        if os.path.exists(snap_db):
+            conn = sqlite3.connect(snap_db)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT claim_id, statement, category "
+                "FROM claims",
+            ).fetchall()
+            conn.close()
+            items = [
+                (r["claim_id"], r["statement"],
+                 {"claim_id": r["claim_id"],
+                  "category": r["category"] or ""})
+                for r in rows
+            ]
+            if items:
+                idx.add_texts(items)
+
+    return idx
+
+
+# Cache for loaded vector indices (snapshot_dir -> VectorIndex).
+_snapshot_vector_cache = {}
+
+
+def _get_snapshot_vector_index(snapshot_dir):
+    """Get or load a cached vector index for a snapshot."""
+    if snapshot_dir in _snapshot_vector_cache:
+        return _snapshot_vector_cache[snapshot_dir]
+    idx = _load_snapshot_vector_index(snapshot_dir)
+    if idx is not None:
+        _snapshot_vector_cache[snapshot_dir] = idx
+    return idx
 
 
 def _get_event_sequence(db_path, domain_id="default"):
@@ -589,9 +732,23 @@ def build_snapshot(domain_id, db_path=None, profile_name=None,
     snap_conn.commit()
     snap_conn.close()
 
+    # --- 5b. Build vector index ---
+    vector_info = _build_vector_index(version_dir, filtered)
+    if vector_info:
+        vec_backend, vec_model, vec_dim = vector_info
+    else:
+        vec_backend = "none"
+        vec_model = None
+        vec_dim = None
+
     # --- 6. Write manifest and integrity ---
     # Record event sequence at build time for diffing.
     event_seq = _get_event_sequence(db_path, domain_id)
+
+    files_list = ["snapshot.sqlite", "manifest.json",
+                  "integrity.sha256"]
+    if vec_backend != "none":
+        files_list.append("vectors/")
 
     manifest = {
         "version": version_str,
@@ -604,9 +761,10 @@ def build_snapshot(domain_id, db_path=None, profile_name=None,
         "claim_count": len(filtered),
         "evidence_count": len(filtered_evidence),
         "profile": profile_name or domain_id,
-        "vector_backend": "none",
-        "files": ["snapshot.sqlite", "manifest.json",
-                  "integrity.sha256"],
+        "vector_backend": vec_backend,
+        "vector_model": vec_model,
+        "vector_dimensions": vec_dim,
+        "files": files_list,
     }
     with open(os.path.join(version_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
@@ -775,9 +933,60 @@ def test_snapshot(snapshot_path, domain_id, profile_name=None,
     }
 
 
+def _vector_query(snapshot_dir, query, top_k, min_confidence,
+                  snap_db):
+    """Try vector search on a snapshot. Returns results or None."""
+    idx = _get_snapshot_vector_index(snapshot_dir)
+    if idx is None:
+        return None
+
+    try:
+        hits = idx.search(query, k=top_k * 2)  # Over-fetch for filtering.
+    except Exception:
+        return None
+
+    if not hits:
+        return None
+
+    # Look up full claim data from SQLite.
+    conn = sqlite3.connect(snap_db)
+    conn.row_factory = sqlite3.Row
+
+    results = []
+    for claim_id, score, _meta in hits:
+        if len(results) >= top_k:
+            break
+        row = conn.execute(
+            "SELECT * FROM claims WHERE claim_id = ?",
+            (claim_id,),
+        ).fetchone()
+        if not row:
+            continue
+        if row["confidence"] < min_confidence:
+            continue
+        results.append({
+            "claim_id": row["claim_id"],
+            "statement": row["statement"],
+            "confidence": row["confidence"],
+            "status": row["status"],
+            "category": row["category"],
+            "source_tier": row["source_tier"],
+            "source_summary": row["source_summary"],
+            "claim_type": row["claim_type"],
+            "score": score,
+        })
+
+    conn.close()
+    return results
+
+
 def query_snapshot(domain_id, query, top_k=5, min_confidence=0.0,
-                   snapshots_dir=None):
-    """Query a promoted snapshot using FTS5. Returns result dict."""
+                   snapshots_dir=None, search_method=None):
+    """Query a promoted snapshot. Tries vector search first,
+    falls back to FTS5. Returns result dict.
+
+    search_method: 'vector', 'fts5', or None (auto).
+    """
     snap_dir = snapshots_dir or DEFAULT_SNAPSHOTS_DIR
     current_dir = os.path.join(snap_dir, domain_id, "current")
 
@@ -789,6 +998,24 @@ def query_snapshot(domain_id, query, top_k=5, min_confidence=0.0,
     if not os.path.exists(snap_db):
         return {"error": f"Snapshot database not found: {snap_db}"}
 
+    used_method = None
+
+    # Try vector search first (unless forced to fts5).
+    if search_method != "fts5":
+        vec_results = _vector_query(
+            current_dir, query, top_k, min_confidence, snap_db)
+        if vec_results is not None:
+            used_method = "vector"
+            return {
+                "results": vec_results,
+                "query": query,
+                "count": len(vec_results),
+                "search_method": used_method,
+            }
+
+    # Fall back to FTS5 (or forced).
+    used_method = "fts5"
+
     conn = sqlite3.connect(snap_db)
     conn.row_factory = sqlite3.Row
 
@@ -799,7 +1026,10 @@ def query_snapshot(domain_id, query, top_k=5, min_confidence=0.0,
     )
     if not fts_query:
         conn.close()
-        return {"results": [], "query": query}
+        return {
+            "results": [], "query": query,
+            "search_method": used_method,
+        }
 
     # Quote each term for FTS5 safety.
     terms = fts_query.split()
@@ -819,7 +1049,11 @@ def query_snapshot(domain_id, query, top_k=5, min_confidence=0.0,
         ).fetchall()
     except sqlite3.OperationalError:
         conn.close()
-        return {"results": [], "query": query, "error": "FTS5 query failed"}
+        return {
+            "results": [], "query": query,
+            "error": "FTS5 query failed",
+            "search_method": used_method,
+        }
 
     results = []
     for r in rows:
@@ -838,7 +1072,11 @@ def query_snapshot(domain_id, query, top_k=5, min_confidence=0.0,
         })
 
     conn.close()
-    return {"results": results, "query": query, "count": len(results)}
+    return {
+        "results": results, "query": query,
+        "count": len(results),
+        "search_method": used_method,
+    }
 
 
 class SnapshotWorker(Worker):
@@ -945,15 +1183,21 @@ class SnapshotWorker(Worker):
             "promoted_at": _now_iso(),
         }
 
-    @skill("loom.snapshot.query", "Search promoted snapshot using FTS5")
+    @skill("loom.snapshot.query",
+           "Search promoted snapshot (vector + FTS5)")
     def snapshot_query(self, handle):
-        """Query a promoted snapshot using FTS5 full-text search.
+        """Query a promoted snapshot using vector or FTS5 search.
+
+        Tries vector search first (semantic similarity), falls
+        back to FTS5 (keyword matching) if unavailable.
 
         Params:
             domain_id (str): Domain identifier.
             query (str): Search query.
             top_k (int, optional): Max results (default 5).
-            min_confidence (float, optional): Minimum confidence filter.
+            min_confidence (float, optional): Confidence filter.
+            search_method (str, optional): Force 'vector' or
+                'fts5'. Default: auto (vector first).
         """
         p = handle.params
         domain_id = p.get("domain_id", "")
@@ -967,6 +1211,7 @@ class SnapshotWorker(Worker):
             top_k=p.get("top_k", 5),
             min_confidence=p.get("min_confidence", 0.0),
             snapshots_dir=p.get("snapshots_dir"),
+            search_method=p.get("search_method"),
         )
 
 
