@@ -2,7 +2,8 @@
 
 Provides the persistent storage layer for the Loom evidence graph. Uses
 SQLite for storage with a schema supporting claims, evidence links,
-provenance chains, and version history.
+provenance chains, and version history. Semantic search via grove-kit
+VectorIndex (StubBackend by default, FAISSBackend when available).
 """
 
 import hashlib
@@ -13,6 +14,32 @@ import sys
 from datetime import datetime, timezone
 
 from grove.uwp import Worker, skill
+
+# Import grove-kit vector search abstraction.
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__),
+                    "..", "..", "..", "grove-kit", "kb"))
+try:
+    from vector import (
+        VectorIndex, StubBackend, StubEmbedder,
+    )
+    _VECTOR_AVAILABLE = True
+except ImportError:
+    _VECTOR_AVAILABLE = False
+
+# Try FAISS backend (optional).
+try:
+    from faiss_backend import FAISSBackend
+    _FAISS_AVAILABLE = True
+except ImportError:
+    _FAISS_AVAILABLE = False
+
+# Try Gemini embedder (optional).
+try:
+    from gemini_embedder import GeminiEmbedder
+    _GEMINI_AVAILABLE = True
+except ImportError:
+    _GEMINI_AVAILABLE = False
 
 # Anti-patterns from the spec
 ANTI_PATTERN_ORPHAN_CLAIM = "orphan_claim"  # Claim without evidence link
@@ -260,6 +287,113 @@ def _emit_event(db, event_type, aggregate_id,
     return event_id
 
 
+# Vector index cache: db_path -> VectorIndex
+_vector_indices = {}
+
+
+def _get_vector_index(db_path=""):
+    """Get or create a VectorIndex for a DB path.
+
+    Uses StubBackend + StubEmbedder by default.
+    Falls back to None if grove-kit not available.
+    """
+    if not _VECTOR_AVAILABLE:
+        return None
+
+    path = db_path or os.environ.get(
+        "LOOM_DB_PATH", DEFAULT_DB_PATH)
+    if path in _vector_indices:
+        return _vector_indices[path]
+
+    # Choose backend: FAISS if available, else Stub.
+    if _FAISS_AVAILABLE:
+        idx_dir = os.path.splitext(path)[0] + "_vectors"
+        os.makedirs(idx_dir, exist_ok=True)
+        backend = FAISSBackend(idx_dir)
+    else:
+        backend = StubBackend()
+
+    # Choose embedder: Gemini if key present, else Stub.
+    if (_GEMINI_AVAILABLE
+            and os.environ.get("GEMINI_API_KEY")):
+        embedder = GeminiEmbedder()
+    else:
+        embedder = StubEmbedder(dim=64)
+
+    idx = VectorIndex(backend, embedder)
+    _vector_indices[path] = idx
+    return idx
+
+
+def _index_claim(db_path, claim_id, statement):
+    """Add a claim to the vector index."""
+    idx = _get_vector_index(db_path)
+    if idx is None:
+        return
+    idx.add_text(claim_id, statement, {
+        "claim_id": claim_id,
+    })
+
+
+def _reindex_all(db_path):
+    """Rebuild the vector index from all claims in the DB.
+
+    Used when the index is empty but the DB has claims
+    (e.g. first time enabling vector search on existing DB).
+    """
+    idx = _get_vector_index(db_path)
+    if idx is None:
+        return 0
+
+    path = db_path or os.environ.get(
+        "LOOM_DB_PATH", DEFAULT_DB_PATH)
+    if not os.path.exists(path):
+        return 0
+
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT claim_id, statement FROM claims"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return 0
+    conn.close()
+
+    if not rows:
+        return 0
+
+    items = [
+        (r["claim_id"], r["statement"], {
+            "claim_id": r["claim_id"],
+        })
+        for r in rows
+    ]
+    idx.add_texts(items)
+    return len(items)
+
+
+def _vector_search(db_path, query, k=10):
+    """Search claims using vector similarity.
+
+    Returns list of (claim_id, score) or None if
+    vector search is not available.
+    """
+    idx = _get_vector_index(db_path)
+    if idx is None:
+        return None
+
+    # Auto-reindex if index is empty but DB has claims.
+    if idx.count() == 0:
+        count = _reindex_all(db_path)
+        if count == 0:
+            return None
+
+    results = idx.search(query, k=k)
+    return [(id, score) for id, score, _ in results]
+
+
 class LoomKBWorker(Worker):
     worker_type = "kb"
 
@@ -267,8 +401,8 @@ class LoomKBWorker(Worker):
     def kb_search(self, handle):
         """Search the knowledge base for claims matching a query.
 
-        Stub for semantic search. In production, this would use an
-        embedding index for vector similarity search.
+        Uses vector similarity search when available, falling
+        back to LIKE-based keyword search otherwise.
 
         Params (from handle.params):
             query (str): Search query.
@@ -284,32 +418,53 @@ class LoomKBWorker(Worker):
         query = params.get("query", "")
         limit = params.get("limit", 10)
         status_filter = params.get("status_filter", "")
+        db_path = params.get("db_path", "")
 
         if not query:
             return {"error": "query is required", "results": []}
 
-        db = _get_db(params.get("db_path", ""))
+        db = _get_db(db_path)
         try:
-            # Stub: simple LIKE search. Production would use vector similarity.
-            sql = "SELECT * FROM claims WHERE statement LIKE ? "
-            args = [f"%{query}%"]
-
-            if status_filter:
-                sql += "AND status = ? "
-                args.append(status_filter)
-
-            sql += "ORDER BY confidence DESC LIMIT ?"
-            args.append(limit)
-
-            rows = db.execute(sql, args).fetchall()
+            # Try vector search first.
+            vec_results = _vector_search(db_path, query, k=limit * 2)
+            if vec_results:
+                claim_ids = [cid for cid, _ in vec_results]
+                placeholders = ",".join("?" for _ in claim_ids)
+                sql = (
+                    f"SELECT * FROM claims "
+                    f"WHERE claim_id IN ({placeholders})"
+                )
+                args = list(claim_ids)
+                if status_filter:
+                    sql += " AND status = ?"
+                    args.append(status_filter)
+                rows = db.execute(sql, args).fetchall()
+                # Preserve vector ranking order.
+                row_map = {r["claim_id"]: r for r in rows}
+                ordered = [
+                    row_map[cid] for cid in claim_ids
+                    if cid in row_map
+                ][:limit]
+                search_method = "vector"
+            else:
+                # Fall back to LIKE search.
+                sql = "SELECT * FROM claims WHERE statement LIKE ? "
+                args = [f"%{query}%"]
+                if status_filter:
+                    sql += "AND status = ? "
+                    args.append(status_filter)
+                sql += "ORDER BY confidence DESC LIMIT ?"
+                args.append(limit)
+                ordered = db.execute(sql, args).fetchall()
+                search_method = "keyword"
 
             results = []
-            for row in rows:
+            for row in ordered:
                 claim_id = row["claim_id"]
                 evidence_rows = db.execute(
-                    "SELECT * FROM evidence WHERE claim_id = ?", (claim_id,)
+                    "SELECT * FROM evidence WHERE claim_id = ?",
+                    (claim_id,),
                 ).fetchall()
-
                 results.append({
                     "claim_id": claim_id,
                     "statement": row["statement"],
@@ -318,7 +473,12 @@ class LoomKBWorker(Worker):
                     "evidence": [dict(e) for e in evidence_rows],
                 })
 
-            return {"results": results, "query": query, "total": len(results)}
+            return {
+                "results": results,
+                "query": query,
+                "total": len(results),
+                "search_method": search_method,
+            }
         finally:
             db.close()
 
@@ -429,7 +589,8 @@ class LoomKBWorker(Worker):
             return {"error": "statement is required", "stored": False}
 
         now = _now_iso()
-        db = _get_db(params.get("db_path", ""))
+        db_path = params.get("db_path", "")
+        db = _get_db(db_path)
         try:
             # Deduplication: check for exact match first
             existing = db.execute(
@@ -614,6 +775,10 @@ class LoomKBWorker(Worker):
                 )
 
             db.commit()
+
+            # Index claim for vector search.
+            _index_claim(db_path, claim_id, statement)
+
             return {"claim_id": claim_id, "stored": True}
         except Exception as e:
             db.rollback()
@@ -624,61 +789,104 @@ class LoomKBWorker(Worker):
 
     @skill("loom.kb.find_similar", "Find claims similar to a statement")
     def kb_find_similar(self, handle):
-        """Find claims in the KB that are similar to a given statement.
+        """Find claims in the KB that are similar to a statement.
 
-        Uses exact match and LIKE-based fuzzy matching. Returns matches
-        with their current confidence and evidence.
+        Uses vector similarity when available, falling back to
+        LIKE-based keyword matching.
 
         Params (from handle.params):
             statement (str): The statement to match against.
-            threshold (float, optional): Minimum word overlap (0-1).
+            threshold (float, optional): Minimum similarity (0-1).
+            limit (int, optional): Max similar results (default 10).
 
         Returns:
-            dict with exact_matches and fuzzy_matches.
+            dict with exact_matches, similar_matches, and
+            search_method.
         """
         params = handle.params
         statement = params.get("statement", "")
+        limit = params.get("limit", 10)
 
         if not statement:
             return {"error": "statement is required"}
 
-        db = _get_db(params.get("db_path", ""))
+        db_path = params.get("db_path", "")
+        db = _get_db(db_path)
         try:
-            # Exact match
+            # Exact match always checked.
             exact = db.execute(
-                "SELECT * FROM claims WHERE statement = ?", (statement,)
+                "SELECT * FROM claims WHERE statement = ?",
+                (statement,),
             ).fetchall()
 
-            # Fuzzy: match on significant words (3+ chars, not stopwords)
-            stopwords = {"the", "a", "an", "is", "are", "was", "were",
-                         "in", "on", "at", "to", "for", "of", "and",
-                         "or", "but", "not", "with", "by", "from", "that"}
-            words = [w.lower().strip(".,;:!?\"'()") for w in statement.split()
-                     if len(w) > 2 and w.lower() not in stopwords]
-
-            fuzzy = []
-            if words:
-                # Search for claims containing key words.
-                # Use top non-numeric keywords for fuzzy match
-                # (numbers vary, words indicate topic similarity)
-                text_words = [w for w in words if not w.replace(",", "").isdigit()][:3]
-                if not text_words:
-                    text_words = words[:2]
-
-                conditions = " AND ".join(
-                    "statement LIKE ?" for _ in text_words
-                )
-                args = [f"%{w}%" for w in text_words]
-                rows = db.execute(
-                    f"SELECT * FROM claims WHERE {conditions} "
-                    "AND statement != ? LIMIT 20",
-                    args + [statement],
-                ).fetchall()
-                fuzzy = [dict(r) for r in rows]
+            # Try vector similarity.
+            vec_results = _vector_search(
+                db_path, statement, k=limit + 1)
+            if vec_results:
+                # Exclude the exact match from vector results.
+                similar_ids = [
+                    (cid, score) for cid, score in vec_results
+                    if not any(
+                        e["claim_id"] == cid for e in exact)
+                ][:limit]
+                if similar_ids:
+                    placeholders = ",".join(
+                        "?" for _ in similar_ids)
+                    rows = db.execute(
+                        f"SELECT * FROM claims "
+                        f"WHERE claim_id IN ({placeholders})",
+                        [cid for cid, _ in similar_ids],
+                    ).fetchall()
+                    row_map = {r["claim_id"]: r for r in rows}
+                    similar = []
+                    for cid, score in similar_ids:
+                        if cid in row_map:
+                            r = dict(row_map[cid])
+                            r["similarity_score"] = score
+                            similar.append(r)
+                else:
+                    similar = []
+                search_method = "vector"
+            else:
+                # Fall back to LIKE-based fuzzy matching.
+                stopwords = {
+                    "the", "a", "an", "is", "are", "was",
+                    "were", "in", "on", "at", "to", "for",
+                    "of", "and", "or", "but", "not", "with",
+                    "by", "from", "that",
+                }
+                words = [
+                    w.lower().strip(".,;:!?\"'()")
+                    for w in statement.split()
+                    if len(w) > 2
+                    and w.lower() not in stopwords
+                ]
+                similar = []
+                if words:
+                    text_words = [
+                        w for w in words
+                        if not w.replace(",", "").isdigit()
+                    ][:3]
+                    if not text_words:
+                        text_words = words[:2]
+                    conditions = " AND ".join(
+                        "statement LIKE ?"
+                        for _ in text_words
+                    )
+                    args = [f"%{w}%" for w in text_words]
+                    rows = db.execute(
+                        f"SELECT * FROM claims "
+                        f"WHERE {conditions} "
+                        "AND statement != ? LIMIT ?",
+                        args + [statement, limit],
+                    ).fetchall()
+                    similar = [dict(r) for r in rows]
+                search_method = "keyword"
 
             return {
                 "exact_matches": [dict(r) for r in exact],
-                "fuzzy_matches": fuzzy,
+                "similar_matches": similar,
+                "search_method": search_method,
             }
         finally:
             db.close()

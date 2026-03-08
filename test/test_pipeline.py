@@ -313,8 +313,15 @@ class TestKBStorage(unittest.TestCase):
         ))
 
         results = self.kb.kb_search(self._params(query="boils"))
-        self.assertEqual(len(results["results"]), 1)
-        self.assertIn("boils", results["results"][0]["statement"])
+        self.assertGreaterEqual(len(results["results"]), 1)
+        # With vector search, results may include non-keyword
+        # matches ranked by embedding similarity. Verify at
+        # least one result contains the query term.
+        found = any(
+            "boils" in r["statement"]
+            for r in results["results"]
+        )
+        self.assertTrue(found)
 
     def test_missing_claim_errors(self):
         result = self.kb.kb_query_claim(
@@ -957,8 +964,12 @@ class TestContradictionDetection(unittest.TestCase):
         result = self.kb.kb_find_similar(self._params(
             statement="City population is 55,000 residents",
         ))
-        # Should find the two population claims as fuzzy matches
-        self.assertGreaterEqual(len(result["fuzzy_matches"]), 2)
+        # Should find the two population claims as similar matches
+        # (key is "similar_matches" with vector search,
+        #  was "fuzzy_matches" with LIKE fallback)
+        matches = result.get(
+            "similar_matches", result.get("fuzzy_matches", []))
+        self.assertGreaterEqual(len(matches), 2)
 
 
 class TestGoldenPipeline(unittest.TestCase):
