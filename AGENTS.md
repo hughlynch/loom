@@ -65,7 +65,7 @@ loom/
 | KB | `loom.kb.search`, `loom.kb.query_claim`, `loom.kb.claim_history`, `loom.kb.store_claim`, `loom.kb.update_claim`, `loom.kb.find_similar`, `loom.kb.record_contradiction`, `loom.kb.retract_source`, `loom.kb.build_labels`, `loom.kb.sensitivity`, `loom.kb.expiring_claims`, `loom.kb.find_orphans`, `loom.kb.find_expired`, `loom.kb.stale_contradictions`, `loom.kb.source_health`, `loom.kb.integrity_report`, `loom.kb.events_since`, `loom.kb.event_count` | all real (SQLite + vector search, i12/i14) |
 | Snapshot | `loom.snapshot.build`, `loom.snapshot.test`, `loom.snapshot.promote`, `loom.snapshot.query`, `loom.snapshot.check_trigger`, `loom.snapshot.build_if_needed` | all real (FTS5, quality gates, event-driven, i11/i13) |
 | Tutor | `loom.tutor.assess`, `loom.tutor.teach`, `loom.tutor.verify` | all real (KB-backed, LLM optional, i16) |
-| Monitor | `loom.monitor.source_rates`, `loom.monitor.challenge_health` | all stubs |
+| Monitor | `loom.monitor.source_rates`, `loom.monitor.challenge_health`, `loom.monitor.system_health` | all real (SQLite read-only, anomaly detection, i17) |
 
 ## Pipeline CLI
 

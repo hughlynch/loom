@@ -697,3 +697,43 @@ spec (`spec/pedagogy.md`).
 
 36 new tests including full assess→teach→verify loop.
 217 total tests, all green.
+
+## 2026-03-08: Momentum i17 — Monitor worker
+
+Replaced stub implementations with three real skills for
+system health monitoring.
+
+**loom.monitor.source_rates**:
+- Queries KB for claims and evidence in a configurable window
+- Computes tier, domain, and category distributions
+- Anomaly detection with minimum sample threshold (≥5):
+  - Low-tier wave: T6+T7 > 50% of total claims
+  - Single-origin flood: one domain > 50% of evidence
+  - Topic flood: one category > 60% of claims
+
+**loom.monitor.challenge_health**:
+- Tracks contradiction resolution rates over window
+- Computes average age of unresolved contradictions
+- Alerts: stale challenges (avg age > 1 week),
+  low resolution rate (< 50% with ≥3 contradictions)
+
+**loom.monitor.system_health** (new composite skill):
+- DB statistics (table counts, file size)
+- Snapshot freshness (age, version, claim count)
+- Source anomaly summary
+- Challenge metrics summary
+- Overall classification: healthy / attention_needed / degraded
+- Issues list: no_snapshot, stale_snapshot, stale_challenges,
+  critical_anomalies
+
+**Design decisions**:
+- Read-only DB access (mode=ro) for all queries
+- Graceful degradation: missing DB or tables return zero-value
+  metrics, never raise
+- Anomaly detection uses simple ratio thresholds, not
+  statistical modeling — appropriate for current scale
+- Composite health uses issue classification, not numeric score
+
+20 new tests covering anomaly detection, rate metrics,
+challenge metrics, DB stats, snapshot freshness, and all
+three worker skills. 237 total tests, all green.
