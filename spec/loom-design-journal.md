@@ -657,3 +657,43 @@ pass unchanged.
 
 21 new tests with mock LLM responses.
 181 total tests, all green.
+
+## 2026-03-08: Momentum i16 — tutor worker
+
+Replaced stub tutor worker with real implementations
+backed by the KB evidence graph, fulfilling the pedagogy
+spec (`spec/pedagogy.md`).
+
+**loom.tutor.assess**:
+- Queries KB for claims matching the topic
+- Generates diagnostic questions scaled to mastery level:
+  recognition (novice), recall (developing), application
+  (proficient/expert)
+- Scores responses against expected answers
+- Determines mastery level from score
+
+**loom.tutor.teach**:
+- Retrieves relevant claims from KB
+- Selects teaching strategy: direct (novice), example
+  (developing), socratic (proficient+)
+- Builds content with epistemic honesty: low-confidence
+  claims are flagged, never presented as settled
+- LLM-backed explanation when LOOM_MODEL available
+- Structured fallback: formatted claim presentation
+
+**loom.tutor.verify**:
+- Post-teaching verification quiz
+- Scores responses, identifies knowledge gaps
+- Tracks mastery improvement
+- Reports specific questions needing review
+
+**Design decisions**:
+- In-memory learner model (no DB schema yet) — full
+  learner persistence is a later iteration
+- Deterministic question generation (no LLM needed for
+  questions, only for explanations)
+- Keyword matching for recall scoring, substantive-
+  response check for application scoring
+
+36 new tests including full assess→teach→verify loop.
+217 total tests, all green.

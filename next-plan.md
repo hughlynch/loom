@@ -1,6 +1,6 @@
 # Loom — Next Plan
 
-## History (i0-i15)
+## History (i0-i16)
 
 - Phase 1-4: Foundation through advanced reasoning (9 iterations)
 - i10: Maintenance skills
@@ -9,51 +9,47 @@
 - i13: Event-driven snapshot builds
 - i14: Vector search integration (grove-kit VectorIndex)
 - i15: LLM-backed hybrid extraction
+- i16: Tutor worker (assess, teach, verify with KB integration)
 
-181 tests, all green.
+217 tests, all green.
 
-## i16 — Tutor Worker (next)
+## i17 — Monitor Worker (next)
 
-Implement the tutor worker from the pedagogy spec
-(`spec/pedagogy.md`). The tutor is the teaching interface
-for Loom's knowledge — it adapts to learner level, uses
-Socratic questioning, and verifies understanding.
+Implement the monitor worker for system health tracking.
+Currently stubbed with `source_rates` and `challenge_health`
+skills.
 
 ### Steps
 
-1. Implement `loom.tutor.assess` skill
-   - Evaluate learner's current knowledge level on a topic
-   - Query KB for claims in the topic domain
-   - Generate assessment questions from claims
-   - Score responses against KB evidence
+1. Implement `loom.monitor.source_rates`
+   - Track claim acquisition rates per source tier
+   - Detect stale sources (no new claims in N days)
+   - Report tier distribution health
 
-2. Implement `loom.tutor.teach` skill
-   - Adaptive explanation based on learner level
-   - Use KB claims as source of truth
-   - Cite evidence for each teaching point
-   - LLM-backed explanation generation
+2. Implement `loom.monitor.challenge_health`
+   - Track contradiction resolution rates
+   - Monitor open challenges and their age
+   - Report challenge backlog health
 
-3. Implement `loom.tutor.verify` skill
-   - Post-teaching verification quiz
-   - Compare learner responses to KB claims
-   - Track knowledge gaps for follow-up
+3. Implement `loom.monitor.system_health`
+   - Composite health score combining all monitors
+   - DB size, event log growth, snapshot freshness
+   - Alert thresholds
 
 4. Tests
-   - Mock LLM responses for deterministic testing
-   - Verify KB integration (claims used in teaching)
-   - Test level adaptation
 
 ### Dependencies
 
-- LOOM_MODEL for LLM-backed teaching (stub without)
-- KB worker for claim retrieval
+- KB worker (source data)
+- Snapshot worker (freshness data)
 
 ## Future iterations
 
 - Snapshot vector index (embed claims during build)
-- Monitor worker (source rates, challenge health)
 - Curator worker (human-in-the-loop review)
+- Learner persistence (DB schema for tutor)
 - libSQL migration (gated on external maturity)
+- Update AGENTS.md skill map to reflect all changes
 
 ## has_next
-true — i16: tutor worker
+true — i17: monitor worker
