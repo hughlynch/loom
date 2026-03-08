@@ -596,3 +596,31 @@ previous build's manifest. Moved the call before directory
 creation.
 
 146 total tests, all green.
+
+## 2026-03-08: Momentum i14 — vector search integration
+
+First consumer of the grove-kit vector search abstraction.
+Replaced LIKE-based fuzzy matching in the KB worker with
+semantic vector search via `VectorIndex`.
+
+**Changes to KB worker**:
+- Import grove-kit `VectorIndex`, `StubBackend`, `StubEmbedder`
+  (with optional `FAISSBackend`, `GeminiEmbedder`)
+- `_get_vector_index(db_path)`: lazy creation and caching
+- `_index_claim()`: adds claim to vector index on store
+- `_reindex_all()`: rebuilds index from all DB claims
+- `_vector_search()`: search with auto-reindex on empty index
+- `kb_search`: vector search first, LIKE fallback
+- `kb_find_similar`: vector similarity first, LIKE fallback
+- Both skills now return `search_method` ("vector" or "keyword")
+
+**Design decisions**:
+- StubBackend + StubEmbedder (64-dim) by default — zero
+  external dependencies, deterministic, sufficient for testing
+- Auto-reindex: when vector index is empty but DB has claims,
+  transparently rebuilds on first search
+- LIKE fallback: if vector module unavailable or DB empty
+- Dedup path doesn't re-index (claim already in index)
+
+14 new tests in `test_vector_search.py`.
+160 total tests, all green.

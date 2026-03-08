@@ -1,74 +1,65 @@
 # Loom — Next Plan
 
-## History (i0-i13)
+## History (i0-i14)
 
 All four architectural recommendation phases implemented
-across 9 momentum iterations, plus maintenance skills (i10),
-snapshot build pipeline (i11), event-sourced storage (i12),
-and event-driven snapshot builds (i13):
+across 9 momentum iterations, plus infrastructure and
+integration work:
 
-- Phase 1: Foundation (harvester, extractor, classifier,
-  corroborator, KB, pipeline) — 5 iterations
-- Phase 2: Dual-axis schema (C1-C6, GRADE, ClaimReview,
-  structured disagreement, Toulmin) — 2 iterations
-- Phase 3: Dependency network (ATMS labels, retraction
-  propagation, sensitivity analysis) — 1 iteration
-- Phase 4: Advanced reasoning (ACH, Devil's Advocacy,
-  Dung semantics) — 1 iteration
+- Phase 1: Foundation (5 iterations)
+- Phase 2: Dual-axis schema (2 iterations)
+- Phase 3: Dependency network (1 iteration)
+- Phase 4: Advanced reasoning (1 iteration)
 - i10: Maintenance skills
 - i11: Snapshot build pipeline (FTS5, quality gates, profiles)
 - i12: Event-sourced storage (event log, emission, querying)
 - i13: Event-driven snapshot builds (trigger policy, manifests)
+- i14: Vector search integration (grove-kit VectorIndex)
 
-146 tests, all green. Go E2E passes.
+160 tests, all green. Go E2E passes.
 
-grove-kit vector abstraction also shipped (37 tests):
-VectorBackend, FAISSBackend, StubBackend, GeminiEmbedder.
+## i15 — LLM-Backed Extraction (next)
 
-## i14 — Vector Search Integration (next)
-
-Replace LIKE-based fuzzy matching in KB worker with grove-kit
-VectorIndex for semantic search. This is the first consumer
-of the grove-kit vector search abstraction.
+Replace heuristic claim extraction with LLM-backed extraction
+for higher quality. The heuristic extractor (regex/sentence
+segmentation) catches explicit factual assertions but misses
+implicit claims, complex inferences, and nuanced relationships.
 
 ### Steps
 
-1. Add grove-kit dependency to Loom KB worker
-   - Import VectorIndex, StubBackend/FAISSBackend, StubEmbedder/GeminiEmbedder
-   - Initialize index alongside DB connection
+1. Add LLM extraction skill to extractor worker
+   - Use LOOM_MODEL env var (default: claude-haiku-4-5)
+   - Structured output: list of claims with category,
+     confidence hint, entities, relationships
+   - Prompt: role=fact_extractor, extract verifiable claims
 
-2. Replace `kb_find_similar` LIKE query with vector search
-   - Embed claim statements on store
-   - Query by embedding on find_similar
-   - Fall back to LIKE when vector index unavailable
+2. Hybrid mode: LLM + heuristic
+   - LLM extraction as primary when LOOM_MODEL is set
+   - Heuristic as fallback when no API key / no LLM
+   - Merge results (dedup by statement similarity)
 
-3. Add vector index to snapshot build
-   - Embed filtered claims during build
-   - Save vector index alongside snapshot.sqlite
-   - Update manifest: vector_backend = "faiss" or "stub"
+3. Entity and relationship extraction via LLM
+   - Replace regex-based entity extraction
+   - Extract typed relationships between entities
 
-4. Update snapshot query to support semantic search
-   - Add `loom.snapshot.query_semantic` skill (or mode param)
-   - Use VectorIndex.search() against snapshot's vector index
-
-5. Tests
-   - KB find_similar with stub vectors (deterministic)
-   - Snapshot build includes vector artifacts
-   - Semantic query returns relevant results
+4. Tests
+   - Mock LLM responses for deterministic testing
+   - Compare LLM vs heuristic on golden fixtures
+   - Verify structured output parsing
 
 ### Dependencies
 
-- grove-kit kb/vector.py (already merged to main)
-- GEMINI_API_KEY for real embeddings (falls back to stub)
+- LOOM_MODEL env var (or ANTHROPIC_API_KEY)
+- grove-kit claude or gemini worker for LLM calls
 
 ## Future iterations
 
+- Snapshot vector index (embed claims during build)
 - Canary deployment routing for snapshot rollouts
-- LLM-backed extraction (LOOM_MODEL)
 - Tutor worker implementation (pedagogy spec)
 - Monitor worker (source rates, challenge health)
 - Curator worker (human-in-the-loop review)
 - libSQL migration (gated on external maturity)
 
 ## has_next
-true — i14: vector search integration
+true — i15: LLM-backed extraction
